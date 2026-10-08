@@ -138,6 +138,12 @@ function isFutureOrToday(date) {
   return date >= toDateInput(new Date());
 }
 
+function isStudentCancellationEligible(booking) {
+  const [year, month, day] = String(booking.date).split('-').map(Number);
+  const startTimestamp = Date.UTC(year, month - 1, day, Number(booking.startHour)) - 330 * 60 * 1000;
+  return Number.isFinite(startTimestamp) && startTimestamp > Date.now() + 24 * 60 * 60 * 1000;
+}
+
 function datePlus(days) {
   const date = new Date();
   date.setDate(date.getDate() + days);
@@ -370,14 +376,12 @@ function App() {
   }
 
   function requestBookingCancellation(booking) {
-    const [year, month, day] = booking.date.split('-').map(Number);
-    const startTimestamp = Date.UTC(year, month - 1, day, Number(booking.startHour)) - 330 * 60 * 1000;
-    const withinCancellationWindow = startTimestamp <= Date.now() + 24 * 60 * 60 * 1000;
-    if (isOwner || skipCancellationConfirmation || withinCancellationWindow) {
+    if (isOwner) {
       return cancelBooking(booking.id);
     }
+    if (!isStudentCancellationEligible(booking)) return;
+    if (skipCancellationConfirmation) return cancelBooking(booking.id);
     setPendingCancellation(booking);
-    return Promise.resolve({ ok: true });
   }
 
   async function confirmBookingCancellation(booking, rememberChoice) {
@@ -821,8 +825,17 @@ function App() {
                 {isOwner
                   ? <button className="icon-button" type="button" onClick={() => { setBookingConfirmed(false); setReceiptBooking(booking); }} title="View receipt"><Eye size={18} /></button>
                   : <button className="ghost-button booking-detail-button" type="button" onClick={() => { setBookingConfirmed(false); setReceiptBooking(booking); }} title="View booking confirmation"><span>Details</span></button>}
-                {(!booking.cancelledAt && (isOwner || booking.bookedBy === currentUser.id)) &&
+                {!booking.cancelledAt && isOwner &&
                   <button className="danger-button" type="button" onClick={() => requestBookingCancellation(booking)} title="Cancel booking"><Trash2 size={18} /></button>}
+                {!booking.cancelledAt && !isOwner && booking.bookedBy === currentUser.id &&
+                  (isStudentCancellationEligible(booking)
+                    ? <button className="danger-button" type="button" onClick={() => requestBookingCancellation(booking)} title="Cancel booking"><Trash2 size={18} /></button>
+                    : <button
+                        className="ghost-button booking-detail-button cancellation-unavailable-button"
+                        type="button"
+                        disabled
+                        title="Online cancellation is available only up to 24 hours before the booking."
+                      ><span>Cancellation unavailable</span></button>)}
               </article>
             ))
           )}

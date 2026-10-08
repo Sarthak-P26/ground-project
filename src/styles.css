@@ -2166,6 +2166,12 @@ textarea:focus {
   background: #e8f4ed;
 }
 
+.student-experience .cancellation-unavailable-button:disabled {
+  background: #f3f5f4;
+  color: #69756d;
+  cursor: not-allowed;
+}
+
 .student-booking-modal {
   gap: 12px;
   border-radius: 22px;
