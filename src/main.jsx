@@ -10,7 +10,6 @@ import {
   Clock,
   CreditCard,
   Download,
-  Home,
   Dumbbell,
   Eye,
   Filter,
@@ -62,7 +61,6 @@ const DEFAULT_SETTINGS = {
   sports: ['Cricket', 'Football'],
   bookingWindowDays: 14,
   maxActiveBookingsPerPhone: 2,
-  adminPin: '1234',
   maintenanceDates: [],
 };
 
@@ -77,6 +75,13 @@ function loadJson(key, fallback) {
 
 function saveJson(key, value) {
   localStorage.setItem(key, JSON.stringify(value));
+}
+
+function authHeaders(headers = {}) {
+  return {
+    ...headers,
+    Authorization: `Bearer ${loadJson(STORAGE_KEYS.token, '')}`,
+  };
 }
 
 function toDateInput(date) {
@@ -147,6 +152,10 @@ function App() {
   const [currentUser, setCurrentUser] = useState(() => (
     loadJson(STORAGE_KEYS.token, '') ? loadJson(STORAGE_KEYS.user, null) : null
   ));
+  const [accountRole, setAccountRole] = useState(() => (
+    loadJson(STORAGE_KEYS.user, null)?.role === 'owner' ? 'owner' : 'student'
+  ));
+  const [authRole, setAuthRole] = useState('student');
   const [authMode, setAuthMode] = useState(() => new URLSearchParams(window.location.search).get('reset') ? 'reset' : 'home');
   const [authError, setAuthError] = useState('');
   const [authNotice, setAuthNotice] = useState('');
@@ -154,20 +163,17 @@ function App() {
   const [appMessage, setAppMessage] = useState('');
   const [syncStatus, setSyncStatus] = useState('Connecting');
   const [activeDate, setActiveDate] = useState(() => toDateInput(new Date()));
+  const [selectedSport, setSelectedSport] = useState(() => settings.sports[0] || 'Cricket');
   const [selectedSlot, setSelectedSlot] = useState(null);
-  const [weather, setWeather] = useState({});
   const [forecast, setForecast] = useState([]);
-  const [priceSuggestions, setPriceSuggestions] = useState({});
-  const [acceptedSuggestions, setAcceptedSuggestions] = useState({});
   const [receiptBooking, setReceiptBooking] = useState(null);
   const [search, setSearch] = useState('');
   const [showSettings, setShowSettings] = useState(false);
-  const [showAdminUnlock, setShowAdminUnlock] = useState(false);
-  const [isAdmin, setIsAdmin] = useState(() => sessionStorage.getItem('turf-admin') === 'yes');
-  const [dashboardMode, setDashboardMode] = useState(() => sessionStorage.getItem('turf-admin') === 'yes' ? 'admin' : 'student');
   const [sportFilter, setSportFilter] = useState('All');
+  const [showProfile, setShowProfile] = useState(false);
 
   const slots = useMemo(() => makeTimeSlots(settings), [settings]);
+  const isOwner = accountRole === 'owner';
   const today = toDateInput(new Date());
   const quickDates = useMemo(() => Array.from({ length: 7 }, (_, index) => datePlus(index)), []);
   const latestBookingDate = useMemo(() => {
@@ -180,7 +186,12 @@ function App() {
     .filter((booking) => booking.date === activeDate)
     .sort((a, b) => a.startHour - b.startHour || a.section.localeCompare(b.section));
 
-  const filteredBookings = bookings
+  const myBookings = currentUser
+    ? bookings
+        .filter((booking) => booking.bookedBy === currentUser.id || (!booking.bookedBy && booking.phone === currentUser.phone))
+        .sort((a, b) => `${a.date}-${a.startHour}`.localeCompare(`${b.date}-${b.startHour}`))
+    : [];
+  const filteredBookings = (isOwner ? bookings : myBookings)
     .filter((booking) => {
       const q = search.trim().toLowerCase();
       const matchesSport = sportFilter === 'All' || booking.sport === sportFilter;
@@ -196,22 +207,32 @@ function App() {
   const totalCapacity = settings.sections.length * slots.length;
   const bookedCount = selectedDateBookings.length;
   const availableCount = Math.max(totalCapacity - bookedCount, 0);
-  const revenue = selectedDateBookings.reduce((sum, booking) => sum + Number(booking.price), 0);
-  const nextBooking = activeBookings
-    .filter((booking) => isFutureOrToday(booking.date))
-    .sort((a, b) => `${a.date}-${a.startHour}`.localeCompare(`${b.date}-${b.startHour}`))[0];
-  const myBookings = currentUser
-    ? bookings
-        .filter((booking) => !booking.cancelledAt && (booking.bookedBy === currentUser.id || booking.phone === currentUser.phone))
-        .sort((a, b) => `${a.date}-${a.startHour}`.localeCompare(`${b.date}-${b.startHour}`))
-    : [];
-  const myNextBooking = myBookings.find((booking) => isFutureOrToday(booking.date));
+  const myNextBooking = myBookings.find((booking) => !booking.cancelledAt && isFutureOrToday(booking.date));
   const utilization = totalCapacity ? Math.round((bookedCount / totalCapacity) * 100) : 0;
+
+  useEffect(() => {
+    const token = loadJson(STORAGE_KEYS.token, '');
+    if (!token) return;
+    fetch('/api/auth/session', { headers: authHeaders() })
+      .then(async (response) => {
+        if (!response.ok) throw new Error('expired');
+        const { user } = await response.json();
+        setCurrentUser(user);
+        setAccountRole(user.role === 'owner' ? 'owner' : 'student');
+      })
+      .catch(() => {
+        localStorage.removeItem(STORAGE_KEYS.token);
+        localStorage.removeItem(STORAGE_KEYS.user);
+        setCurrentUser(null);
+        setAuthMode('login');
+        setAuthNotice('Your session expired. Please log in again.');
+      });
+  }, []);
 
   useEffect(() => {
     async function loadServerStore() {
       try {
-        const response = await fetch('/api/store');
+        const response = await fetch('/api/store', { headers: authHeaders() });
         if (!response.ok) throw new Error('Server unavailable');
         const store = await response.json();
         const mergedSettings = { ...DEFAULT_SETTINGS, ...store.settings };
@@ -228,13 +249,7 @@ function App() {
     loadServerStore();
   }, []);
 
-  useEffect(() => {
-    Promise.all(slots.map(async (hour) => [hour, await fetch(`/api/weather-risk?date=${activeDate}&hour=${hour}`).then((r) => r.json())]))
-      .then((items) => setWeather(Object.fromEntries(items))).catch(() => setWeather({}));
-  }, [activeDate, slots.length]);
-
   useEffect(() => { fetch('/api/forecast').then((r) => r.json()).then(setForecast).catch(() => setForecast([])); }, []);
-  useEffect(() => { fetch(`/api/price-suggestions?date=${activeDate}`).then((r) => r.json()).then(setPriceSuggestions).catch(() => setPriceSuggestions({})); }, [activeDate]);
 
   function persistBookings(nextBookings) {
     setBookings(nextBookings);
@@ -298,7 +313,7 @@ function App() {
     try {
       const response = await fetch('/api/bookings', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(nextBooking),
       });
       if (!response.ok) {
@@ -319,28 +334,12 @@ function App() {
     return { ok: true };
   }
 
-  function unlockAdmin(pin) {
-    if (pin === String(settings.adminPin || '1234')) {
-      sessionStorage.setItem('turf-admin', 'yes');
-      setIsAdmin(true);
-      setDashboardMode('admin');
-      setShowAdminUnlock(false);
-      return true;
-    }
-    return false;
-  }
-
-  function requireAdmin(action) {
-    if (!isAdmin) {
-      setShowAdminUnlock(true);
-      return;
-    }
-    action();
-  }
-
   async function cancelBooking(bookingId) {
     try {
-      const response = await fetch(`/api/bookings/${bookingId}`, { method: 'DELETE' });
+      const response = await fetch(`/api/bookings/${bookingId}`, {
+        method: 'DELETE',
+        headers: authHeaders(),
+      });
       if (!response.ok) {
         const result = await response.json();
         throw new Error(result.message || 'Could not cancel booking.');
@@ -359,7 +358,7 @@ function App() {
     try {
       const response = await fetch('/api/settings', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(nextSettings),
       });
       const store = await response.json();
@@ -380,7 +379,7 @@ function App() {
     try {
       const response = await fetch(`/api/bookings/${id}/payment`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ paymentStatus: 'paid' }),
       });
       const result = await response.json();
@@ -397,6 +396,7 @@ function App() {
   function applyAuthenticatedSession(user, store, sessionToken) {
     const mergedSettings = { ...DEFAULT_SETTINGS, ...(store?.settings || settings) };
     setCurrentUser(user);
+    setAccountRole(user.role === 'owner' ? 'owner' : 'student');
     setSettings(mergedSettings);
     setBookings(store?.bookings || bookings);
     saveJson(STORAGE_KEYS.user, user);
@@ -447,14 +447,35 @@ function App() {
     }
   }
 
-  function logout() {
+  async function logout() {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST', headers: authHeaders() });
+    } catch {
+      setSyncStatus('Offline');
+    }
     localStorage.removeItem(STORAGE_KEYS.user);
     localStorage.removeItem(STORAGE_KEYS.token);
-    sessionStorage.removeItem('turf-admin');
     setCurrentUser(null);
-    setIsAdmin(false);
-    setDashboardMode('student');
+    setAccountRole('student');
     setAuthMode('home');
+  }
+
+  async function saveProfile(profile) {
+    try {
+      const response = await fetch('/api/profile', {
+        method: 'PUT',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(profile),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.message || 'Could not save profile.');
+      setCurrentUser(result.user);
+      saveJson(STORAGE_KEYS.user, result.user);
+      setShowProfile(false);
+      setAppMessage('Profile updated.');
+    } catch (error) {
+      setAppMessage(error.message || 'Profile could not be saved.');
+    }
   }
 
   function scrollToSection(id) {
@@ -499,6 +520,8 @@ function App() {
         authLoading={authLoading}
         settings={settings}
         bookings={bookings}
+        authRole={authRole}
+        onRoleChange={setAuthRole}
         onModeChange={(mode) => {
           setAuthMode(mode);
           setAuthError('');
@@ -526,18 +549,12 @@ function App() {
             <UserRound size={18} />
             <span>{currentUser.name}</span>
           </div>
-          <button className="ghost-button" type="button" onClick={() => requireAdmin(exportBookings)} title="Export bookings">
-            <Download size={18} />
-            <span>Export</span>
-          </button>
-          <button className="ghost-button" type="button" onClick={() => isAdmin ? setDashboardMode(dashboardMode === 'admin' ? 'student' : 'admin') : setShowAdminUnlock(true)}>
-            <ShieldCheck size={18} /><span>{dashboardMode === 'admin' ? 'Student View' : 'Owner Console'}</span>
-          </button>
-          <button className="ghost-button" type="button" onClick={logout} title="Back to public home"><Home size={18} /><span>Home</span></button>
+          {isOwner && <button className="ghost-button" type="button" onClick={exportBookings} title="Export bookings">
+            <Download size={18} /><span>Export</span>
+          </button>}
+          <button className="ghost-button" type="button" onClick={() => setShowProfile(true)}><UserRound size={18} /><span>Profile</span></button>
           <span className={`sync-pill ${syncStatus.toLowerCase()}`}>{syncStatus}</span>
-          <button className="icon-button" type="button" onClick={() => requireAdmin(() => setShowSettings(true))} title="Admin settings">
-            {isAdmin ? <Settings size={20} /> : <Lock size={20} />}
-          </button>
+          {isOwner && <button className="icon-button" type="button" onClick={() => setShowSettings(true)} title="Turf settings"><Settings size={20} /></button>}
           <button className="icon-button" type="button" onClick={logout} title="Log out">
             <LogOut size={20} />
           </button>
@@ -547,21 +564,19 @@ function App() {
       {appMessage && <p className="form-error" role="alert">{appMessage}</p>}
 
       <nav className="product-tabs" aria-label="Main navigation">
-        <button type="button" onClick={() => scrollToSection('overview')}>
-          <Gauge size={17} />
-          <span>Overview</span>
-        </button>
-        <button type="button" onClick={() => scrollToSection('schedule')}>
-          <CalendarDays size={17} />
-          <span>Schedule</span>
-        </button>
-        <button type="button" onClick={() => scrollToSection('records')}>
-          <ClipboardCheck size={17} />
-          <span>Records</span>
-        </button>
+        {isOwner ? <>
+          <button type="button" onClick={() => scrollToSection('overview')}><Gauge size={17} /><span>Dashboard</span></button>
+          <button type="button" onClick={() => scrollToSection('records')}><ClipboardCheck size={17} /><span>Bookings</span></button>
+          <button type="button" onClick={() => setShowSettings(true)}><IndianRupee size={17} /><span>Pricing & Turf settings</span></button>
+          <button type="button" onClick={() => scrollToSection('analytics')}><Activity size={17} /><span>Analytics</span></button>
+          <button type="button" onClick={() => scrollToSection('ai-tools')}><Sparkles size={17} /><span>AI tools</span></button>
+        </> : <>
+          <button type="button" onClick={() => scrollToSection('schedule')}><CalendarDays size={17} /><span>Browse & Book</span></button>
+          <button type="button" onClick={() => scrollToSection('records')}><ClipboardCheck size={17} /><span>My Bookings</span></button>
+        </>}
       </nav>
 
-      <section className="command-deck" id="overview">
+      {!isOwner && <section className="command-deck" id="overview">
         <div className="deck-copy">
           <div className="auth-kicker">
             <Activity size={16} />
@@ -591,21 +606,21 @@ function App() {
             <Activity size={22} />
           </div>
         </div>
-      </section>
+      </section>}
 
       <section className="simple-welcome">
-        <div><p>{dashboardMode === 'admin' ? 'Owner Console' : 'Student Booking'}</p><h2>{dashboardMode === 'admin' ? 'Control today’s turf, at a glance.' : `Hi ${currentUser.name.split(' ')[0]}, choose a time that works.`}</h2><span>{dashboardMode === 'admin' ? 'Live operations, collections, and AI demand guidance in one place.' : 'Pick a date, check the rain signal, and reserve an open section.'}</span></div>
-        <button className="primary-button" type="button" onClick={() => scrollToSection(dashboardMode === 'admin' ? 'records' : 'schedule')}><CalendarDays size={18} /><span>{dashboardMode === 'admin' ? 'View Bookings' : 'Book a Slot'}</span></button>
+        <div><p>{isOwner ? 'Turf Admin / Owner' : 'Student Booking'}</p><h2>{isOwner ? 'Manage your college turf.' : `Hi ${currentUser.name.split(' ')[0]}, choose a time that works.`}</h2><span>{isOwner ? 'Bookings, revenue, occupancy, turf settings and business analytics.' : 'Choose a sport and date, see the price, and reserve an available slot.'}</span></div>
+        <button className="primary-button" type="button" onClick={() => scrollToSection(isOwner ? 'records' : 'schedule')}><CalendarDays size={18} /><span>{isOwner ? 'View Bookings' : 'Book a Slot'}</span></button>
       </section>
 
-      {dashboardMode === 'admin' && <section className="forecast-card">
+      {isOwner && <section className="forecast-card" id="analytics">
         <div><p>AI Demand Signal</p><h2>7-Day Demand Forecast</h2></div>
         <ResponsiveContainer width="100%" height={180}><LineChart data={forecast}><XAxis dataKey="label" /><YAxis /><Tooltip /><Line type="monotone" dataKey="demand" stroke="#1a73e8" strokeWidth={3} dot={{ r: 4 }} /></LineChart></ResponsiveContainer>
       </section>}
 
-      {dashboardMode === 'admin' && <OwnerDashboard bookings={activeBookings} onMarkPaid={markBookingPaid} />}
+      {isOwner && <OwnerDashboard bookings={activeBookings} settings={settings} onMarkPaid={markBookingPaid} />}
 
-      <section className="summary-strip">
+      {!isOwner && <><section className="summary-strip">
         <Metric icon={<LayoutGrid size={20} />} label="Sections" value={settings.sections.length} tone="green" />
         <Metric icon={<Clock size={20} />} label="Slot Duration" value={`${settings.durationHours} hr`} tone="blue" />
         <Metric icon={<IndianRupee size={20} />} label="Price" value={currency(settings.price)} tone="gold" />
@@ -654,42 +669,16 @@ function App() {
             <div className="snapshot-grid">
               <SmallStat label="Booked" value={bookedCount} />
               <SmallStat label="Open" value={availableCount} />
-              <SmallStat label="Income" value={currency(revenue)} />
               <SmallStat label="Slots" value={totalCapacity} />
-            </div>
-          </div>
-
-          <div className="panel-group">
-            <h3>Section Load</h3>
-            <div className="section-load-list">
-              {settings.sections.map((section) => {
-                const count = selectedDateBookings.filter((booking) => booking.section === section).length;
-                const percent = slots.length ? Math.round((count / slots.length) * 100) : 0;
-                const suggestion = priceSuggestions[section];
-                const suggested = suggestion?.suggestedPrice ?? settings.price;
-                return (
-                  <div className="load-row" key={section}>
-                    <div>
-                      <strong>{section}</strong>
-                      <span>{count}/{slots.length} booked</span>
-                    </div>
-                    <div className="load-bar">
-                      <span style={{ width: `${percent}%` }} />
-                    </div>
-                    <small>Base {currency(settings.price)} · Suggested {currency(suggested)} {suggestion ? `(${suggestion.demand}% ${suggestion.recommendation.toLowerCase()})` : ''}</small>
-                    {isAdmin && suggested !== settings.price && <button className="text-button" type="button" onClick={() => setAcceptedSuggestions((current) => ({ ...current, [section]: suggested }))}>{acceptedSuggestions[section] ? 'Suggestion accepted for review' : 'Accept suggestion'}</button>}
-                  </div>
-                );
-              })}
             </div>
           </div>
 
           <div className="panel-group next-card">
             <h3>Next Booking</h3>
-            {nextBooking ? (
-              <button className="next-booking" type="button" onClick={() => setReceiptBooking(nextBooking)}>
-                <strong>{nextBooking.playerName}</strong>
-                <span>{formatDate(nextBooking.date)} · {formatHour(nextBooking.startHour)}</span>
+            {myNextBooking ? (
+              <button className="next-booking" type="button" onClick={() => setReceiptBooking(myNextBooking)}>
+                <strong>{myNextBooking.section}</strong>
+                <span>{formatDate(myNextBooking.date)} · {formatHour(myNextBooking.startHour)}</span>
               </button>
             ) : (
               <p className="quiet-text">No upcoming booking in the system.</p>
@@ -703,7 +692,7 @@ function App() {
               <li>Each booking runs for {settings.durationHours} hours.</li>
               <li>Each phone can hold {settings.maxActiveBookingsPerPhone} active bookings.</li>
               <li>Bookings open {settings.bookingWindowDays} days ahead.</li>
-              <li>Students can choose cricket or football.</li>
+              <li>Choose from the sports configured by the turf owner.</li>
             </ul>
           </div>
         </aside>
@@ -714,6 +703,11 @@ function App() {
               <p>Live Schedule</p>
               <h2>Pick a free section and time</h2>
             </div>
+            <label className="schedule-sport">Sport
+              <select value={selectedSport} onChange={(event) => setSelectedSport(event.target.value)}>
+                {settings.sports.map((sport) => <option key={sport}>{sport}</option>)}
+              </select>
+            </label>
             <span>{isBlockedDate(settings, activeDate) ? 'Maintenance blocked' : `${formatHour(settings.openHour)} to ${formatHour(settings.closeHour)}`}</span>
           </div>
 
@@ -745,21 +739,17 @@ function App() {
                       key={`${section}-${hour}`}
                       onClick={() => !booking && setSelectedSlot({ section, hour })}
                       disabled={Boolean(booking)}
-                      title={booking ? `${booking.playerName} has booked this slot` : `Book ${section}`}
+                      title={booking ? 'Unavailable' : `Book ${section}`}
                     >
                       {booking ? (
                         <>
-                          <span>{booking.sport}</span>
-                          <strong>{booking.playerName}</strong>
-                          <small>{booking.phone}</small>
-                          <small className={`weather-tag ${(weather[hour]?.risk || 'Low').toLowerCase()}`}>{weather[hour]?.risk || 'Low'} rain risk</small>
+                          <strong>Unavailable</strong>
                         </>
                       ) : (
                         <>
                           <Plus size={18} />
                           <strong>Available</strong>
                           <small>{currency(settings.price)}</small>
-                          <small className={`weather-tag ${(weather[hour]?.risk || 'Low').toLowerCase()}`}>{weather[hour]?.risk || 'Low'} rain risk</small>
                         </>
                       )}
                     </button>
@@ -771,12 +761,13 @@ function App() {
           )}
         </section>
       </section>
+      </>}
 
       <section className="records-panel" id="records">
         <div className="section-heading">
           <div>
-            <p>Booking Records</p>
-            <h2>Manage reservations</h2>
+            <p>{isOwner ? 'Turf operations' : 'My bookings'}</p>
+            <h2>{isOwner ? 'Manage all reservations' : 'Your reservations'}</h2>
           </div>
           <div className="filter-strip">
             <Filter size={18} />
@@ -827,9 +818,8 @@ function App() {
                 <button className="icon-button" type="button" onClick={() => setReceiptBooking(booking)} title="View receipt">
                   <Eye size={18} />
                 </button>
-                <button className="danger-button" type="button" disabled={Boolean(booking.cancelledAt)} onClick={() => requireAdmin(() => cancelBooking(booking.id))} title={booking.cancelledAt ? 'Already cancelled' : 'Cancel booking'}>
-                  <Trash2 size={18} />
-                </button>
+                {(!booking.cancelledAt && (isOwner || ((booking.bookedBy === currentUser.id || (!booking.bookedBy && booking.phone === currentUser.phone)) && new Date(`${booking.date}T${String(booking.startHour).padStart(2, '0')}:00:00`) > new Date()))) &&
+                  <button className="danger-button" type="button" onClick={() => cancelBooking(booking.id)} title="Cancel booking"><Trash2 size={18} /></button>}
               </article>
             ))
           )}
@@ -841,6 +831,7 @@ function App() {
           settings={settings}
           selectedSlot={selectedSlot}
           activeDate={activeDate}
+          selectedSport={selectedSport}
           currentUser={currentUser}
           onClose={() => setSelectedSlot(null)}
           onSave={addBooking}
@@ -859,25 +850,19 @@ function App() {
         />
       )}
 
-      {showAdminUnlock && (
-        <AdminUnlockModal
-          onClose={() => setShowAdminUnlock(false)}
-          onUnlock={unlockAdmin}
-        />
-      )}
-
       {receiptBooking && (
         <ReceiptModal
           booking={receiptBooking}
           onClose={() => setReceiptBooking(null)}
         />
       )}
+      {showProfile && <ProfileModal user={currentUser} onClose={() => setShowProfile(false)} onSave={saveProfile} />}
 
     </main>
   );
 }
 
-function AuthExperience({ authMode, authError, authNotice, authLoading, settings, bookings, onModeChange, onSubmit }) {
+function AuthExperience({ authMode, authError, authNotice, authLoading, settings, bookings, authRole, onRoleChange, onModeChange, onSubmit }) {
   const today = toDateInput(new Date());
   const todayBookings = bookings.filter((booking) => booking.date === today).length;
   const slots = makeTimeSlots(settings).length * settings.sections.length;
@@ -958,6 +943,8 @@ function AuthExperience({ authMode, authError, authNotice, authLoading, settings
           authError={authError}
           authNotice={authNotice}
           authLoading={authLoading}
+          role={authRole}
+          onRoleChange={onRoleChange}
           onModeChange={onModeChange}
           onSubmit={onSubmit}
         />
@@ -1031,7 +1018,7 @@ function AuthStat({ label, value }) {
   );
 }
 
-function AuthPanel({ mode, authError, authNotice, authLoading, onModeChange, onSubmit }) {
+function AuthPanel({ mode, authError, authNotice, authLoading, role, onRoleChange, onModeChange, onSubmit }) {
   const isSignup = mode === 'signup';
   const panelTitle = mode === 'forgot' ? 'Reset your TurfCast password' : mode === 'reset' ? 'Choose a new password' : isSignup ? 'Create your TurfCast account' : 'Login to book your slot';
   const panelKicker = mode === 'forgot' ? 'Account Recovery' : mode === 'reset' ? 'Secure Reset' : isSignup ? 'New Player' : 'Welcome Back';
@@ -1057,7 +1044,9 @@ function AuthPanel({ mode, authError, authNotice, authLoading, onModeChange, onS
         </div>
       </div>
 
-      {mode === 'forgot' ? <><label>Email or Phone<div className="input-with-icon"><Mail size={18} /><input name="identifier" type="text" placeholder="email or phone" /></div></label><p className="demo-link">{authNotice || 'We’ll email a password reset link to the address on your account.'}</p></> : mode === 'reset' ? <label>New Password<div className="input-with-icon"><Lock size={18} /><input name="password" type="password" placeholder="At least 6 characters" /></div></label> : isSignup ? (
+      {mode === 'forgot' ? <><label>Email or Phone<div className="input-with-icon"><Mail size={18} /><input name="identifier" type="text" placeholder="email or phone" /></div></label><p className="demo-link">{authNotice || 'We’ll email a password reset link to the address on your account.'}</p></> : mode === 'reset' ? <label>New Password<div className="input-with-icon"><Lock size={18} /><input name="password" type="password" placeholder="At least 6 characters" /></div></label> : <>
+      <label>Account type<div className="input-with-icon"><ShieldCheck size={18} /><select name="role" value={role} onChange={(event) => onRoleChange(event.target.value)}><option value="student">Student / Customer</option><option value="owner">Turf Admin / Owner</option></select></div></label>
+      {isSignup ? (
         <>
           <label>
             Full Name
@@ -1080,13 +1069,16 @@ function AuthPanel({ mode, authError, authNotice, authLoading, onModeChange, onS
               <input name="phone" type="tel" placeholder="9876543210" />
             </div>
           </label>
-          <label>
+          {role === 'student' ? <label>
             College ID
             <div className="input-with-icon">
               <ClipboardCheck size={18} />
               <input name="collegeId" type="text" placeholder="Optional roll number" />
             </div>
-          </label>
+          </label> : <>
+            <label>Business / Turf Name<div className="input-with-icon"><Trophy size={18} /><input name="businessName" type="text" placeholder="College turf" /></div></label>
+            <label>Owner Title<div className="input-with-icon"><UserRound size={18} /><input name="ownerTitle" type="text" placeholder="Owner or administrator" /></div></label>
+          </>}
         </>
       ) : (
         <label>
@@ -1097,6 +1089,7 @@ function AuthPanel({ mode, authError, authNotice, authLoading, onModeChange, onS
           </div>
         </label>
       )}
+      </>}
 
       {mode !== 'forgot' && mode !== 'reset' && <label>
         Password
@@ -1144,21 +1137,47 @@ function SmallStat({ label, value }) {
   );
 }
 
-function OwnerDashboard({ bookings, onMarkPaid }) {
+function OwnerDashboard({ bookings, settings, onMarkPaid }) {
   const today = toDateInput(new Date());
   const todayBookings = bookings.filter((booking) => booking.date === today);
   const unpaid = bookings.filter((booking) => booking.paymentStatus === 'unpaid');
-  const expected = todayBookings.reduce((total, booking) => total + Number(booking.price || 0), 0);
+  const revenue = bookings.filter((booking) => booking.paymentStatus === 'paid').reduce((total, booking) => total + Number(booking.price || 0), 0);
+  const outstanding = unpaid.reduce((total, booking) => total + Number(booking.price || 0), 0);
+  const capacity = makeTimeSlots(settings).length * settings.sections.length;
+  const occupancy = capacity ? Math.round((todayBookings.length / capacity) * 100) : 0;
   return (
-    <section className="owner-dashboard">
-      <div className="owner-heading"><div><p>Owner essentials</p><h2>Today’s control board</h2></div><span>Only the actions that need your attention.</span></div>
-      <div className="owner-metrics"><SmallStat label="Today’s bookings" value={todayBookings.length} /><SmallStat label="Expected collection" value={currency(expected)} /><SmallStat label="Payment at venue" value={unpaid.length} /></div>
+    <section className="owner-dashboard" id="owner-dashboard">
+      <div className="owner-heading"><div><p>Owner dashboard</p><h2>College turf at a glance</h2></div><span>Bookings, collection and occupancy.</span></div>
+      <div className="owner-metrics"><SmallStat label="Today’s bookings" value={todayBookings.length} /><SmallStat label="Total paid revenue" value={currency(revenue)} /><SmallStat label="Outstanding payments" value={currency(outstanding)} /><SmallStat label="Today’s occupancy" value={`${occupancy}%`} /></div>
       <div className="collection-list"><div><h3>Collect at venue</h3><p>Mark cash collection after the team arrives.</p></div>{unpaid.length ? unpaid.slice(0, 4).map((booking) => <div className="collection-row" key={booking.id}><span><strong>{booking.playerName}</strong><small>{booking.section} · {formatDate(booking.date)}</small></span><button className="ghost-button" type="button" onClick={() => onMarkPaid(booking.id)}>Mark collected</button></div>) : <p className="quiet-text">No collections waiting.</p>}</div>
+      <div id="ai-tools" className="collection-list"><div><h3>AI tools</h3><p>Existing demand forecast is available above. No automatic price changes are applied.</p></div><button className="text-button" type="button" onClick={() => document.getElementById('analytics')?.scrollIntoView({ behavior: 'smooth' })}>View demand analytics</button></div>
     </section>
   );
 }
 
-function BookingModal({ settings, selectedSlot, activeDate, currentUser, onClose, onSave }) {
+function ProfileModal({ user, onClose, onSave }) {
+  const [saving, setSaving] = useState(false);
+  const isOwner = user.role === 'owner';
+  async function submit(event) {
+    event.preventDefault();
+    setSaving(true);
+    await onSave(Object.fromEntries(new FormData(event.currentTarget).entries()));
+    setSaving(false);
+  }
+  return <div className="modal-backdrop"><form className="modal" onSubmit={submit}>
+    <div className="modal-header"><div><p>{isOwner ? 'Owner account' : 'Student account'}</p><h2>Profile</h2></div><button className="icon-button" type="button" onClick={onClose} title="Close"><X size={20} /></button></div>
+    <label>Full name<input name="name" defaultValue={user.name} required /></label>
+    <label>Email<input name="email" type="email" defaultValue={user.email} required /></label>
+    <label>Phone<input name="phone" type="tel" defaultValue={user.phone} required /></label>
+    {isOwner ? <>
+      <label>Business / Turf Name<input name="businessName" defaultValue={user.businessName || ''} /></label>
+      <label>Owner Title<input name="ownerTitle" defaultValue={user.ownerTitle || ''} /></label>
+    </> : <label>College ID<input name="collegeId" defaultValue={user.collegeId || ''} /></label>}
+    <div className="modal-actions"><button className="ghost-button" type="button" onClick={onClose}>Close</button><button className="primary-button" type="submit" disabled={saving}>{saving ? 'Saving' : 'Save Profile'}</button></div>
+  </form></div>;
+}
+
+function BookingModal({ settings, selectedSlot, activeDate, selectedSport, currentUser, onClose, onSave }) {
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
 
@@ -1209,7 +1228,7 @@ function BookingModal({ settings, selectedSlot, activeDate, currentUser, onClose
         <div className="form-grid">
           <label>
             Sport
-            <select name="sport" defaultValue={settings.sports[0]}>
+            <select name="sport" defaultValue={selectedSport}>
               {settings.sports.map((sport) => (
                 <option key={sport}>{sport}</option>
               ))}
@@ -1267,7 +1286,6 @@ function SettingsModal({ settings, onClose, onSave }) {
       closeHour: Math.max(1, Math.min(24, Number(draft.closeHour))),
       bookingWindowDays: Math.max(1, Number(draft.bookingWindowDays)),
       maxActiveBookingsPerPhone: Math.max(1, Number(draft.maxActiveBookingsPerPhone)),
-      adminPin: String(draft.adminPin || DEFAULT_SETTINGS.adminPin),
       sections: draft.sections.length ? draft.sections : DEFAULT_SETTINGS.sections,
       sports: draft.sports.length ? draft.sports : DEFAULT_SETTINGS.sports,
       maintenanceDates: draft.maintenanceDates || [],
@@ -1343,11 +1361,6 @@ function SettingsModal({ settings, onClose, onSave }) {
           />
         </label>
 
-        <label>
-          Admin PIN
-          <input value={draft.adminPin} onChange={(event) => setDraft((current) => ({ ...current, adminPin: event.target.value }))} />
-        </label>
-
         {error && <p className="form-error" role="alert">{error}</p>}
 
         <div className="modal-actions">
@@ -1355,46 +1368,6 @@ function SettingsModal({ settings, onClose, onSave }) {
           <button className="primary-button" type="submit" disabled={saving}>
             <Save size={18} />
             <span>{saving ? 'Saving' : 'Save Settings'}</span>
-          </button>
-        </div>
-      </form>
-    </div>
-  );
-}
-
-function AdminUnlockModal({ onClose, onUnlock }) {
-  const [pin, setPin] = useState('');
-  const [error, setError] = useState('');
-
-  function handleSubmit(event) {
-    event.preventDefault();
-    if (!onUnlock(pin)) {
-      setError('Wrong admin PIN.');
-    }
-  }
-
-  return (
-    <div className="modal-backdrop">
-      <form className="modal compact-modal" onSubmit={handleSubmit}>
-        <div className="modal-header">
-          <div>
-            <p>Protected Area</p>
-            <h2>Admin Unlock</h2>
-          </div>
-          <button className="icon-button" type="button" onClick={onClose} title="Close">
-            <X size={20} />
-          </button>
-        </div>
-        <label>
-          Admin PIN
-          <input type="password" value={pin} onChange={(event) => setPin(event.target.value)} autoFocus />
-        </label>
-        {error && <p className="form-error">{error}</p>}
-        <div className="modal-actions">
-          <button className="ghost-button" type="button" onClick={onClose}>Cancel</button>
-          <button className="primary-button" type="submit">
-            <Lock size={18} />
-            <span>Unlock</span>
           </button>
         </div>
       </form>

@@ -9,7 +9,7 @@ import nodemailer from 'nodemailer';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express(); const PORT = process.env.PORT || 4173;
-const defaults = { settings: { price: 600, durationHours: 3, openHour: 6, closeHour: 21, sections: ['Section A', 'Section B', 'Section C', 'Section D'], sports: ['Cricket', 'Football'], bookingWindowDays: 14, maxActiveBookingsPerPhone: 2, adminPin: '1234', maintenanceDates: [] }, bookings: [], users: [] };
+const defaults = { settings: { price: 600, durationHours: 3, openHour: 6, closeHour: 21, sections: ['Section A', 'Section B', 'Section C', 'Section D'], sports: ['Cricket', 'Football'], bookingWindowDays: 14, maxActiveBookingsPerPhone: 2, maintenanceDates: [] }, bookings: [], users: [] };
 const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');
 const databaseUrl = process.env.FIREBASE_DATABASE_URL;
 const hasServiceAccount = Boolean(databaseUrl && process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && privateKey);
@@ -40,11 +40,18 @@ const normalizeBooking = (booking = {}) => ({
   paymentMode: booking.paymentMode === 'UPI' ? 'Pay at venue' : (booking.paymentMode || 'Pay at venue'),
   paymentStatus: booking.paymentStatus === 'cancelled' ? 'refunded' : (booking.paymentStatus || 'unpaid'),
 });
-const normalizeStore = (store = {}) => ({
-  settings: { ...defaults.settings, ...(store.settings || {}) },
+const normalizeStore = (store = {}) => {
+  const storedSettings = { ...(store.settings || {}) };
+  delete storedSettings.adminPin;
+  return {
+  settings: { ...defaults.settings, ...storedSettings },
   bookings: list(store.bookings || []).map(normalizeBooking),
-  users: list(store.users || []),
-});
+  users: list(store.users || []).map((user) => ({
+    ...user,
+    role: user.role === 'owner' ? 'owner' : 'student',
+  })),
+  };
+};
 const storePath = path.join(__dirname, 'data', 'store.json');
 async function readFileStore() {
   try {
@@ -99,6 +106,16 @@ const slots = (s) => { const out = []; for (let h = s.openHour; h + s.durationHo
 const today = () => new Date().toISOString().slice(0, 10);
 const hash = (p, salt = crypto.randomBytes(16).toString('hex')) => `${salt}:${crypto.scryptSync(p, salt, 64).toString('hex')}`;
 const matches = (p, stored) => { const [salt, saved] = String(stored || '').split(':'); if (!salt || !saved) return false; const a = crypto.scryptSync(p, salt, 64); const b = Buffer.from(saved, 'hex'); return a.length === b.length && crypto.timingSafeEqual(a, b); };
+const sessionHash = (token) => crypto.createHash('sha256').update(token).digest('hex');
+function authenticatedUser(store, req) {
+  const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (!token) return null;
+  const tokenDigest = Buffer.from(sessionHash(token), 'hex');
+  return store.users.find((user) => {
+    const storedDigest = Buffer.from(String(user.sessionTokenHash || ''), 'hex');
+    return storedDigest.length === tokenDigest.length && crypto.timingSafeEqual(storedDigest, tokenDigest);
+  }) || null;
+}
 const normalizeEmail = (value = '') => String(value).trim().toLowerCase();
 const normalizePhone = (value = '') => {
   const digits = String(value).replace(/\D/g, '').replace(/^0+/, '');
@@ -109,11 +126,46 @@ const normalizeIdentifier = (value = '') => {
   if (!input) return '';
   return input.includes('@') ? normalizeEmail(input) : normalizePhone(input);
 };
-const publicUser = (u) => u && ({ id: u.id, name: u.name, email: u.email, phone: u.phone, collegeId: u.collegeId || '', createdAt: u.createdAt });
+const publicStoreForUser = (store, user) => ({
+  ...publicStore(store),
+  bookings: user?.role === 'owner'
+    ? publicStore(store).bookings
+    : publicStore(store).bookings.map((booking) => {
+        const ownBooking = user && (
+          booking.bookedBy === user.id ||
+          (!booking.bookedBy && normalizePhone(booking.phone) === user.phone)
+        );
+        if (ownBooking) return booking;
+        return {
+          id: booking.id,
+          date: booking.date,
+          section: booking.section,
+          startHour: booking.startHour,
+          endHour: booking.endHour,
+          sport: booking.sport,
+          price: booking.price,
+          cancelledAt: booking.cancelledAt,
+        };
+      }),
+});
+const publicUser = (u) => u && ({
+  id: u.id,
+  name: u.name,
+  email: u.email,
+  phone: u.phone,
+  role: u.role === 'owner' ? 'owner' : 'student',
+  collegeId: u.collegeId || '',
+  businessName: u.businessName || '',
+  ownerTitle: u.ownerTitle || '',
+  createdAt: u.createdAt,
+});
 const publicStore = (s) => ({ settings: s.settings, bookings: (s.bookings || []).map(normalizeBooking) });
 const route = (fn) => async (req, res, next) => { try { await fn(req, res); } catch (e) { next(e); } };
 
-app.get('/api/store', route(async (_req, res) => res.json(publicStore(await readStore()))));
+app.get('/api/store', route(async (req, res) => {
+  const store = await readStore();
+  res.json(publicStoreForUser(store, authenticatedUser(store, req)));
+}));
 app.get('/api/weather-risk', route(async (req, res) => res.json(await weatherRisk(String(req.query.date || today()), Number(req.query.hour || 18)))));
 app.get('/api/forecast', route(async (_req, res) => {
   const store = await readStore();
@@ -165,37 +217,100 @@ app.post('/api/auth/signup', route(async (req, res) => {
     const email = normalizeEmail(req.body.email);
     const phone = normalizePhone(req.body.phone);
     const password = String(req.body.password || '');
+    const role = String(req.body.role || 'student');
     if (!name || !email || !phone || !password) return { status: 400, body: { message: 'Name, email, phone, and password are required.' } };
+    if (!['student', 'owner'].includes(role)) return { status: 400, body: { message: 'Choose student or owner account type.' } };
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { status: 400, body: { message: 'Enter a valid email address.' } };
     if (!/^[6-9]\d{9}$/.test(phone)) return { status: 400, body: { message: 'Enter a valid 10-digit Indian phone number.' } };
     if (password.length < 6) return { status: 400, body: { message: 'Password must be at least 6 characters.' } };
     if (store.users.some((user) => normalizeEmail(user.email) === email || normalizePhone(user.phone) === phone)) {
       return { status: 409, body: { message: 'An account is already registered with this email or phone number.' } };
     }
+    const sessionToken = crypto.randomBytes(32).toString('hex');
     const user = {
       id: `USR-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`,
       name,
       email,
       phone,
+      role,
       collegeId: String(req.body.collegeId || '').trim(),
+      businessName: role === 'owner' ? String(req.body.businessName || '').trim() : '',
+      ownerTitle: role === 'owner' ? String(req.body.ownerTitle || '').trim() : '',
       passwordHash: hash(password),
+      sessionTokenHash: sessionHash(sessionToken),
       createdAt: new Date().toISOString(),
     };
-    const sessionToken = crypto.randomBytes(32).toString('hex');
     store.users.push(user);
     await writeUsers(store.users);
-    return { status: 201, body: { user: publicUser(user), store: publicStore(store), sessionToken } };
+    return { status: 201, body: { user: publicUser(user), store: publicStoreForUser(store, user), sessionToken } };
   });
   res.status(result.status).json(result.body);
 }));
 app.post('/api/auth/login', route(async (req, res) => {
+  const result = await withStoreLock(async () => {
+    const store = await readStore();
+    const identifier = normalizeIdentifier(req.body.identifier);
+    const user = store.users.find((record) => normalizeEmail(record.email) === identifier || normalizePhone(record.phone) === identifier);
+    if (!user || !matches(String(req.body.password || ''), user.passwordHash)) {
+      return { status: 401, body: { message: 'Incorrect email/phone or password. Please try again.' } };
+    }
+    if (!user.role) user.role = 'student';
+    if (req.body.role && req.body.role !== user.role) {
+      return { status: 403, body: { message: `This account is registered as a ${user.role}.` } };
+    }
+    const sessionToken = crypto.randomBytes(32).toString('hex');
+    user.sessionTokenHash = sessionHash(sessionToken);
+    await writeUsers(store.users);
+    return { status: 200, body: { user: publicUser(user), store: publicStoreForUser(store, user), sessionToken } };
+  });
+  res.status(result.status).json(result.body);
+}));
+app.get('/api/auth/session', route(async (req, res) => {
   const store = await readStore();
-  const identifier = normalizeIdentifier(req.body.identifier);
-  const user = store.users.find((record) => normalizeEmail(record.email) === identifier || normalizePhone(record.phone) === identifier);
-  if (!user || !matches(String(req.body.password || ''), user.passwordHash)) {
-    return res.status(401).json({ message: 'Incorrect email/phone or password. Please try again.' });
-  }
-  res.json({ user: publicUser(user), store: publicStore(store), sessionToken: crypto.randomBytes(32).toString('hex') });
+  const user = authenticatedUser(store, req);
+  if (!user) return res.status(401).json({ message: 'Please log in again to continue.' });
+  res.json({ user: publicUser(user) });
+}));
+app.post('/api/auth/logout', route(async (req, res) => {
+  const result = await withStoreLock(async () => {
+    const store = await readStore();
+    const user = authenticatedUser(store, req);
+    if (user) {
+      user.sessionTokenHash = '';
+      await writeUsers(store.users);
+    }
+    return { status: 200, body: { ok: true } };
+  });
+  res.status(result.status).json(result.body);
+}));
+app.put('/api/profile', route(async (req, res) => {
+  const result = await withStoreLock(async () => {
+    const store = await readStore();
+    const user = authenticatedUser(store, req);
+    if (!user) return { status: 401, body: { message: 'Please log in again to update your profile.' } };
+    const userId = user.id;
+    const name = req.body.name === undefined ? user.name : String(req.body.name).trim();
+    const email = req.body.email === undefined ? user.email : normalizeEmail(req.body.email);
+    const phone = req.body.phone === undefined ? user.phone : normalizePhone(req.body.phone);
+    if (!name || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !/^[6-9]\d{9}$/.test(phone)) {
+      return { status: 400, body: { message: 'Enter a name, valid email, and valid 10-digit Indian phone number.' } };
+    }
+    if (store.users.some((record) => record.id !== userId && (normalizeEmail(record.email) === email || normalizePhone(record.phone) === phone))) {
+      return { status: 409, body: { message: 'An account is already registered with this email or phone number.' } };
+    }
+    user.name = name;
+    user.email = email;
+    user.phone = phone;
+    user.role = user.role === 'owner' ? 'owner' : 'student';
+    user.collegeId = String(req.body.collegeId ?? user.collegeId ?? '').trim();
+    if (user.role === 'owner') {
+      user.businessName = String(req.body.businessName ?? user.businessName ?? '').trim();
+      user.ownerTitle = String(req.body.ownerTitle ?? user.ownerTitle ?? '').trim();
+    }
+    await writeUsers(store.users);
+    return { status: 200, body: { user: publicUser(user) } };
+  });
+  res.status(result.status).json(result.body);
 }));
 app.post('/api/auth/forgot-password', route(async (req, res) => {
   if (!mailTransport) {
@@ -258,29 +373,33 @@ app.post('/api/auth/reset-password', route(async (req, res) => {
 app.put('/api/settings', route(async (req, res) => {
   const store = await withStoreLock(async () => {
     const current = await readStore();
+    const user = authenticatedUser(current, req);
+    if (user?.role !== 'owner') return { status: 403, body: { message: 'Owner access is required to update turf settings.' } };
     const old = current.settings;
+    const settingsInput = req.body;
     current.settings = {
       ...old,
-      ...req.body,
-      price: Math.max(1, Number(req.body.price)),
-      durationHours: Math.max(1, Number(req.body.durationHours)),
-      openHour: Math.max(0, Math.min(23, Number(req.body.openHour))),
-      closeHour: Math.max(1, Math.min(24, Number(req.body.closeHour))),
-      sections: Array.isArray(req.body.sections) && req.body.sections.length ? req.body.sections : old.sections,
-      sports: Array.isArray(req.body.sports) && req.body.sports.length ? req.body.sports : old.sports,
-      bookingWindowDays: Math.max(1, Number(req.body.bookingWindowDays || old.bookingWindowDays)),
-      maxActiveBookingsPerPhone: Math.max(1, Number(req.body.maxActiveBookingsPerPhone || old.maxActiveBookingsPerPhone)),
-      adminPin: String(req.body.adminPin || old.adminPin),
-      maintenanceDates: Array.isArray(req.body.maintenanceDates) ? req.body.maintenanceDates : old.maintenanceDates,
+      ...settingsInput,
+      price: Math.max(1, Number(settingsInput.price)),
+      durationHours: Math.max(1, Number(settingsInput.durationHours)),
+      openHour: Math.max(0, Math.min(23, Number(settingsInput.openHour))),
+      closeHour: Math.max(1, Math.min(24, Number(settingsInput.closeHour))),
+      sections: Array.isArray(settingsInput.sections) && settingsInput.sections.length ? settingsInput.sections : old.sections,
+      sports: Array.isArray(settingsInput.sports) && settingsInput.sports.length ? settingsInput.sports : old.sports,
+      bookingWindowDays: Math.max(1, Number(settingsInput.bookingWindowDays || old.bookingWindowDays)),
+      maxActiveBookingsPerPhone: Math.max(1, Number(settingsInput.maxActiveBookingsPerPhone || old.maxActiveBookingsPerPhone)),
+      maintenanceDates: Array.isArray(settingsInput.maintenanceDates) ? settingsInput.maintenanceDates : old.maintenanceDates,
     };
     await writeStore(current);
-    return publicStore(current);
+    return { status: 200, body: publicStore(current) };
   });
-  res.json(store);
+  res.status(store.status).json(store.body);
 }));
 app.post('/api/bookings', route(async (req, res) => {
   const result = await withStoreLock(async () => {
     const store = await readStore();
+    const user = authenticatedUser(store, req);
+    if (!user || user.role !== 'student') return { status: 403, body: { message: 'A student account is required to make a booking.' } };
     const settings = store.settings;
     const booking = {
       ...req.body,
@@ -288,7 +407,7 @@ app.post('/api/bookings', route(async (req, res) => {
       playerName: String(req.body.playerName || '').trim(),
       phone: String(req.body.phone || '').trim(),
       collegeId: String(req.body.collegeId || '').trim(),
-      bookedBy: String(req.body.bookedBy || '').trim(),
+      bookedBy: user.id,
       paymentMode: 'Pay at venue',
       paymentStatus: 'unpaid',
       price: Number(settings.price),
@@ -322,27 +441,38 @@ app.post('/api/bookings', route(async (req, res) => {
     }
     store.bookings.push(booking);
     await writeStore(store);
-    return { status: 201, body: publicStore(store) };
+    return { status: 201, body: publicStoreForUser(store, user) };
   });
   res.status(result.status).json(result.body);
 }));
 app.put('/api/bookings/:id/payment', route(async (req, res) => {
   const result = await withStoreLock(async () => {
     const store = await readStore();
+    const user = authenticatedUser(store, req);
+    if (user?.role !== 'owner') return { status: 403, body: { message: 'Owner access is required to update payments.' } };
     const booking = store.bookings.find((item) => item.id === req.params.id);
     if (!booking || booking.cancelledAt) return { status: 404, body: { message: 'Active booking not found.' } };
     booking.paymentStatus = req.body.paymentStatus === 'paid' ? 'paid' : 'unpaid';
     booking.paymentMode = 'Pay at venue';
     await writeStore(store);
-    return { status: 200, body: publicStore(store) };
+    return { status: 200, body: publicStoreForUser(store, user) };
   });
   res.status(result.status).json(result.body);
 }));
 app.delete('/api/bookings/:id', route(async (req, res) => {
   const result = await withStoreLock(async () => {
     const store = await readStore();
+    const user = authenticatedUser(store, req);
+    if (!user) return { status: 403, body: { message: 'Sign in to manage this booking.' } };
     const booking = store.bookings.find((item) => item.id === req.params.id);
     if (!booking) return { status: 404, body: { message: 'Booking not found.' } };
+    if (user.role !== 'owner' && (booking.bookedBy ? booking.bookedBy !== user.id : booking.phone !== user.phone)) {
+      return { status: 403, body: { message: 'You can only cancel your own booking.' } };
+    }
+    if (booking.cancelledAt) return { status: 409, body: { message: 'This booking has already been cancelled.' } };
+    if (user.role !== 'owner' && new Date(`${booking.date}T${String(booking.startHour).padStart(2, '0')}:00:00`) <= new Date()) {
+      return { status: 400, body: { message: 'This booking can no longer be cancelled online.' } };
+    }
     booking.cancelledAt = new Date().toISOString();
     booking.paymentStatus = 'refunded';
     booking.paymentMode = 'Pay at venue';

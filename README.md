@@ -5,7 +5,10 @@ A full web app for booking a college turf split into four playable sections. It 
 ## Features
 
 - Four-section turf schedule for cricket and football
-- Premium home page with login and signup
+- Separate student/customer and turf owner/admin account roles
+- Student profile and owner profile fields persisted with the account
+- Student view for slot discovery, booking, confirmation, and personal booking management
+- Owner dashboard for all bookings, payment collection, revenue, occupancy, settings, and demand analytics
 - File-backed user accounts with hashed passwords
 - Password recovery emails with one-time links that expire after 15 minutes
 - Three-hour slots at Rs. 600 by default
@@ -13,7 +16,8 @@ A full web app for booking a college turf split into four playable sections. It 
 - Shared Node API with file-backed storage in `data/store.json`
 - Duplicate-slot protection so two players cannot book the same section and time
 - Server-side validation for phone numbers, booking window, maintenance dates, sections, sports, and valid time slots
-- Admin PIN gate for exports, cancellations, and rule changes
+- Owner-only controls for exports, all-booking cancellation, payment updates, and turf settings
+- Students can view and cancel only their own future bookings
 - Fairness limit for active bookings per phone number
 - Maintenance-date blocking
 - Payment mode and college ID fields
@@ -34,7 +38,10 @@ npm start
 
 Open `http://localhost:4173`.
 
-Create an account from the home page, then log in to enter the booking console.
+Create a student or turf owner account from the home page. Students can browse and book
+the college turf; owners can manage bookings, pricing, turf settings, and business
+analytics. Existing accounts without a stored role continue to be treated as students.
+Sign in again after upgrading so the server can establish a role-checked session.
 
 ### Configure Firebase Realtime Database
 
@@ -59,4 +66,6 @@ instead of implying that a message was sent.
 
 ## Change Rules
 
-Use the settings button in the app to change the fee, slot duration, timings, sports, section names, booking window, active-booking limit, maintenance dates, or admin PIN. Default admin PIN is `1234`. New bookings keep the price that was active when they were created.
+Owners can use Turf Settings to change the base fee, slot duration, timings, sports,
+section names, booking window, active-booking limit, and maintenance dates. New bookings
+keep the price that was active when they were created.
