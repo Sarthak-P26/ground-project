@@ -58,8 +58,8 @@ async function readStore() {
   const fileStore = await readFileStore();
   if (!db) return fileStore;
   const [settings, bookings, users] = await Promise.all(['settings', 'bookings', 'users'].map((node) => db.ref(node).once('value')));
-  const mergedUsers = new Map(list(users.val() || []).map((user) => [user.id, user]));
-  for (const user of fileStore.users) mergedUsers.set(user.id, user);
+  const mergedUsers = new Map(fileStore.users.map((user) => [user.id, user]));
+  for (const user of list(users.val() || [])) mergedUsers.set(user.id, user);
   return normalizeStore({
     settings: settings.val() || {},
     bookings: bookings.val() || [],
@@ -80,6 +80,7 @@ async function writeStore(store) {
   await db.ref().update({ settings: store.settings, bookings: store.bookings, users: store.users });
 }
 async function writeUsers(users) {
+  if (db) return db.ref('users').set(users);
   const store = await readFileStore();
   store.users = users;
   await writeFileStore(store);
@@ -99,7 +100,10 @@ const today = () => new Date().toISOString().slice(0, 10);
 const hash = (p, salt = crypto.randomBytes(16).toString('hex')) => `${salt}:${crypto.scryptSync(p, salt, 64).toString('hex')}`;
 const matches = (p, stored) => { const [salt, saved] = String(stored || '').split(':'); if (!salt || !saved) return false; const a = crypto.scryptSync(p, salt, 64); const b = Buffer.from(saved, 'hex'); return a.length === b.length && crypto.timingSafeEqual(a, b); };
 const normalizeEmail = (value = '') => String(value).trim().toLowerCase();
-const normalizePhone = (value = '') => String(value).replace(/\D/g, '').replace(/^0+/, '').replace(/^91/, '').slice(-10);
+const normalizePhone = (value = '') => {
+  const digits = String(value).replace(/\D/g, '').replace(/^0+/, '');
+  return digits.length === 12 && digits.startsWith('91') ? digits.slice(2) : digits.slice(-10);
+};
 const normalizeIdentifier = (value = '') => {
   const input = String(value).trim();
   if (!input) return '';
@@ -251,9 +255,101 @@ app.post('/api/auth/reset-password', route(async (req, res) => {
   if (!result) return res.status(400).json({ message: 'This reset link is invalid or has expired.' });
   res.json({ message: 'Password reset. You can now log in.' });
 }));
-app.put('/api/settings', route(async (req, res) => { const store = await readStore(), old = store.settings; store.settings = { ...old, ...req.body, price: Math.max(1, Number(req.body.price)), durationHours: Math.max(1, Number(req.body.durationHours)), openHour: Math.max(0, Math.min(23, Number(req.body.openHour))), closeHour: Math.max(1, Math.min(24, Number(req.body.closeHour))), sections: Array.isArray(req.body.sections) && req.body.sections.length ? req.body.sections : old.sections, sports: Array.isArray(req.body.sports) && req.body.sports.length ? req.body.sports : old.sports, bookingWindowDays: Math.max(1, Number(req.body.bookingWindowDays || old.bookingWindowDays)), maxActiveBookingsPerPhone: Math.max(1, Number(req.body.maxActiveBookingsPerPhone || old.maxActiveBookingsPerPhone)), adminPin: String(req.body.adminPin || old.adminPin), maintenanceDates: Array.isArray(req.body.maintenanceDates) ? req.body.maintenanceDates : old.maintenanceDates }; await writeStore(store); res.json(publicStore(store)); }));
-app.post('/api/bookings', route(async (req, res) => { const store = await readStore(), s = store.settings; const b = { ...req.body, id: req.body.id || `BK-${Date.now().toString(36).toUpperCase()}`, playerName: String(req.body.playerName || '').trim(), phone: String(req.body.phone || '').trim(), collegeId: String(req.body.collegeId || '').trim(), bookedBy: String(req.body.bookedBy || '').trim(), paymentMode: 'Pay at venue', paymentStatus: 'unpaid', price: Number(s.price), startHour: Number(req.body.startHour), endHour: Number(req.body.startHour) + Number(s.durationHours), teamSize: Number(req.body.teamSize || 1), createdAt: req.body.createdAt || new Date().toISOString() }; if (!b.date || !b.section || !b.playerName || !b.phone) return res.status(400).json({ message: 'Missing booking details.' }); if (!/^[6-9]\d{9}$/.test(b.phone)) return res.status(400).json({ message: 'Enter a valid 10-digit Indian phone number.' }); if (!s.sections.includes(b.section) || !s.sports.includes(b.sport) || !slots(s).includes(b.startHour)) return res.status(400).json({ message: 'Invalid booking details.' }); if (s.maintenanceDates.includes(b.date)) return res.status(400).json({ message: 'This date is blocked for maintenance.' }); const last = new Date(); last.setDate(last.getDate() + Number(s.bookingWindowDays)); if (b.date < today() || b.date > last.toISOString().slice(0, 10)) return res.status(400).json({ message: `Bookings are allowed only within ${s.bookingWindowDays} days.` }); if (store.bookings.filter((x) => !x.cancelledAt && x.phone === b.phone && x.date >= today()).length >= s.maxActiveBookingsPerPhone) return res.status(400).json({ message: `This phone already has ${s.maxActiveBookingsPerPhone} active bookings.` }); if (store.bookings.some((x) => !x.cancelledAt && x.date === b.date && x.section === b.section && Number(x.startHour) === b.startHour)) return res.status(409).json({ message: 'This slot is already booked.' }); store.bookings.push(b); await writeStore(store); res.status(201).json(publicStore(store)); }));
-app.put('/api/bookings/:id/payment', route(async (req, res) => { const store = await readStore(), b = store.bookings.find((item) => item.id === req.params.id); if (!b || b.cancelledAt) return res.status(404).json({ message: 'Active booking not found.' }); b.paymentStatus = req.body.paymentStatus === 'paid' ? 'paid' : 'unpaid'; b.paymentMode = 'Pay at venue'; await writeStore(store); res.json(publicStore(store)); }));
-app.delete('/api/bookings/:id', route(async (req, res) => { const store = await readStore(), b = store.bookings.find((item) => item.id === req.params.id); if (!b) return res.status(404).json({ message: 'Booking not found.' }); b.cancelledAt = new Date().toISOString(); b.paymentStatus = 'refunded'; b.paymentMode = 'Pay at venue'; await writeStore(store); res.json(publicStore(store)); }));
+app.put('/api/settings', route(async (req, res) => {
+  const store = await withStoreLock(async () => {
+    const current = await readStore();
+    const old = current.settings;
+    current.settings = {
+      ...old,
+      ...req.body,
+      price: Math.max(1, Number(req.body.price)),
+      durationHours: Math.max(1, Number(req.body.durationHours)),
+      openHour: Math.max(0, Math.min(23, Number(req.body.openHour))),
+      closeHour: Math.max(1, Math.min(24, Number(req.body.closeHour))),
+      sections: Array.isArray(req.body.sections) && req.body.sections.length ? req.body.sections : old.sections,
+      sports: Array.isArray(req.body.sports) && req.body.sports.length ? req.body.sports : old.sports,
+      bookingWindowDays: Math.max(1, Number(req.body.bookingWindowDays || old.bookingWindowDays)),
+      maxActiveBookingsPerPhone: Math.max(1, Number(req.body.maxActiveBookingsPerPhone || old.maxActiveBookingsPerPhone)),
+      adminPin: String(req.body.adminPin || old.adminPin),
+      maintenanceDates: Array.isArray(req.body.maintenanceDates) ? req.body.maintenanceDates : old.maintenanceDates,
+    };
+    await writeStore(current);
+    return publicStore(current);
+  });
+  res.json(store);
+}));
+app.post('/api/bookings', route(async (req, res) => {
+  const result = await withStoreLock(async () => {
+    const store = await readStore();
+    const settings = store.settings;
+    const booking = {
+      ...req.body,
+      id: req.body.id || `BK-${Date.now().toString(36).toUpperCase()}`,
+      playerName: String(req.body.playerName || '').trim(),
+      phone: String(req.body.phone || '').trim(),
+      collegeId: String(req.body.collegeId || '').trim(),
+      bookedBy: String(req.body.bookedBy || '').trim(),
+      paymentMode: 'Pay at venue',
+      paymentStatus: 'unpaid',
+      price: Number(settings.price),
+      startHour: Number(req.body.startHour),
+      endHour: Number(req.body.startHour) + Number(settings.durationHours),
+      teamSize: Number(req.body.teamSize || 1),
+      createdAt: req.body.createdAt || new Date().toISOString(),
+    };
+    if (!booking.date || !booking.section || !booking.playerName || !booking.phone) {
+      return { status: 400, body: { message: 'Missing booking details.' } };
+    }
+    if (!/^[6-9]\d{9}$/.test(booking.phone)) {
+      return { status: 400, body: { message: 'Enter a valid 10-digit Indian phone number.' } };
+    }
+    if (!settings.sections.includes(booking.section) || !settings.sports.includes(booking.sport) || !slots(settings).includes(booking.startHour)) {
+      return { status: 400, body: { message: 'Invalid booking details.' } };
+    }
+    if (settings.maintenanceDates.includes(booking.date)) {
+      return { status: 400, body: { message: 'This date is blocked for maintenance.' } };
+    }
+    const last = new Date();
+    last.setDate(last.getDate() + Number(settings.bookingWindowDays));
+    if (booking.date < today() || booking.date > last.toISOString().slice(0, 10)) {
+      return { status: 400, body: { message: `Bookings are allowed only within ${settings.bookingWindowDays} days.` } };
+    }
+    if (store.bookings.filter((item) => !item.cancelledAt && item.phone === booking.phone && item.date >= today()).length >= settings.maxActiveBookingsPerPhone) {
+      return { status: 400, body: { message: `This phone already has ${settings.maxActiveBookingsPerPhone} active bookings.` } };
+    }
+    if (store.bookings.some((item) => !item.cancelledAt && item.date === booking.date && item.section === booking.section && Number(item.startHour) === booking.startHour)) {
+      return { status: 409, body: { message: 'This slot is already booked.' } };
+    }
+    store.bookings.push(booking);
+    await writeStore(store);
+    return { status: 201, body: publicStore(store) };
+  });
+  res.status(result.status).json(result.body);
+}));
+app.put('/api/bookings/:id/payment', route(async (req, res) => {
+  const result = await withStoreLock(async () => {
+    const store = await readStore();
+    const booking = store.bookings.find((item) => item.id === req.params.id);
+    if (!booking || booking.cancelledAt) return { status: 404, body: { message: 'Active booking not found.' } };
+    booking.paymentStatus = req.body.paymentStatus === 'paid' ? 'paid' : 'unpaid';
+    booking.paymentMode = 'Pay at venue';
+    await writeStore(store);
+    return { status: 200, body: publicStore(store) };
+  });
+  res.status(result.status).json(result.body);
+}));
+app.delete('/api/bookings/:id', route(async (req, res) => {
+  const result = await withStoreLock(async () => {
+    const store = await readStore();
+    const booking = store.bookings.find((item) => item.id === req.params.id);
+    if (!booking) return { status: 404, body: { message: 'Booking not found.' } };
+    booking.cancelledAt = new Date().toISOString();
+    booking.paymentStatus = 'refunded';
+    booking.paymentMode = 'Pay at venue';
+    await writeStore(store);
+    return { status: 200, body: publicStore(store) };
+  });
+  res.status(result.status).json(result.body);
+}));
 app.use((err, _req, res, _next) => { console.error(err); res.status(500).json({ message: 'Could not read or save app data. Check data/store.json permissions and server logs.' }); });
 app.use(express.static(path.join(__dirname, 'dist'))); app.get('*', (_req, res) => res.sendFile(path.join(__dirname, 'dist', 'index.html'))); app.listen(PORT, () => console.log(`Turf booking app running at http://localhost:${PORT}`));

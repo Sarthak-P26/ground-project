@@ -36,6 +36,17 @@ Open `http://localhost:4173`.
 
 Create an account from the home page, then log in to enter the booking console.
 
+### Configure Firebase Realtime Database
+
+Copy `.env.example` to `.env` and provide a Firebase service account's project ID,
+client email, private key, and Realtime Database URL. With these credentials set,
+the server persists account records, bookings, and settings in Firebase. If Firebase
+is not configured, it uses `data/store.json`.
+
+To move an existing file-backed store into Firebase, run `npm run migrate:firebase`
+after configuring the credentials. Public REST demo mode is available only when
+`FIREBASE_ALLOW_PUBLIC_REST=true`; do not use it for production.
+
 ### Configure Gmail password recovery
 
 Password reset emails use Gmail SMTP. In `.env`, set `SMTP_USER` to the Gmail address

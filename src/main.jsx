@@ -28,7 +28,6 @@ import {
   Search,
   Settings,
   ShieldCheck,
-  SlidersHorizontal,
   Sparkles,
   Star,
   Trash2,
@@ -152,6 +151,7 @@ function App() {
   const [authError, setAuthError] = useState('');
   const [authNotice, setAuthNotice] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
+  const [appMessage, setAppMessage] = useState('');
   const [syncStatus, setSyncStatus] = useState('Connecting');
   const [activeDate, setActiveDate] = useState(() => toDateInput(new Date()));
   const [selectedSlot, setSelectedSlot] = useState(null);
@@ -311,8 +311,8 @@ function App() {
       setReceiptBooking(store.bookings.find((booking) => booking.id === nextBooking.id) || nextBooking);
       setSyncStatus('Live');
     } catch {
-      persistBookings([...bookings, nextBooking]);
       setSyncStatus('Offline');
+      return { ok: false, message: 'Booking could not be saved. Check your connection and try again.' };
     }
 
     setSelectedSlot(null);
@@ -341,13 +341,17 @@ function App() {
   async function cancelBooking(bookingId) {
     try {
       const response = await fetch(`/api/bookings/${bookingId}`, { method: 'DELETE' });
-      if (!response.ok) throw new Error('Could not delete');
+      if (!response.ok) {
+        const result = await response.json();
+        throw new Error(result.message || 'Could not cancel booking.');
+      }
       const store = await response.json();
       persistBookings(store.bookings);
       setSyncStatus('Live');
-    } catch {
-      persistBookings(bookings.filter((booking) => booking.id !== bookingId));
+      setAppMessage('');
+    } catch (error) {
       setSyncStatus('Offline');
+      setAppMessage(error.message || 'Booking could not be cancelled. Check your connection and try again.');
     }
   }
 
@@ -358,14 +362,35 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(nextSettings),
       });
-      if (!response.ok) throw new Error('Could not save settings');
       const store = await response.json();
+      if (!response.ok) throw new Error(store.message || 'Could not save settings.');
       persistSettings(store.settings);
       persistBookings(store.bookings);
       setSyncStatus('Live');
-    } catch {
-      persistSettings(nextSettings);
+      setAppMessage('');
+      return true;
+    } catch (error) {
       setSyncStatus('Offline');
+      setAppMessage(error.message || 'Settings could not be saved. Check your connection and try again.');
+      return false;
+    }
+  }
+
+  async function markBookingPaid(id) {
+    try {
+      const response = await fetch(`/api/bookings/${id}/payment`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentStatus: 'paid' }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.message || 'Could not update payment status.');
+      persistBookings(result.bookings);
+      setSyncStatus('Live');
+      setAppMessage('');
+    } catch (error) {
+      setSyncStatus('Offline');
+      setAppMessage(error.message || 'Payment status could not be updated. Check your connection and try again.');
     }
   }
 
@@ -519,6 +544,8 @@ function App() {
         </div>
       </header>
 
+      {appMessage && <p className="form-error" role="alert">{appMessage}</p>}
+
       <nav className="product-tabs" aria-label="Main navigation">
         <button type="button" onClick={() => scrollToSection('overview')}>
           <Gauge size={17} />
@@ -576,38 +603,7 @@ function App() {
         <ResponsiveContainer width="100%" height={180}><LineChart data={forecast}><XAxis dataKey="label" /><YAxis /><Tooltip /><Line type="monotone" dataKey="demand" stroke="#1a73e8" strokeWidth={3} dot={{ r: 4 }} /></LineChart></ResponsiveContainer>
       </section>}
 
-      {dashboardMode === 'admin' && <OwnerDashboard bookings={activeBookings} onMarkPaid={async (id) => { const response = await fetch(`/api/bookings/${id}/payment`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paymentStatus: 'paid' }) }); if (response.ok) { const store = await response.json(); persistBookings(store.bookings); } }} />}
-
-      {false && <section className="command-hero product-hero">
-        <div className="hero-copy">
-          <p>Four-section campus turf</p>
-          <h2>Book a clean three-hour window before the rush starts.</h2>
-          <div className="hero-actions">
-            <button className="primary-button" type="button" onClick={() => window.scrollTo({ top: 380, behavior: 'smooth' })}>
-              <CalendarDays size={18} />
-              <span>Book Slot</span>
-            </button>
-            <button className="ghost-button glass" type="button" onClick={() => requireAdmin(() => setShowSettings(true))}>
-              <SlidersHorizontal size={18} />
-              <span>{isAdmin ? 'Change Rules' : 'Admin Unlock'}</span>
-            </button>
-          </div>
-        </div>
-        <div className="turf-stage" aria-label="Four section turf preview">
-          <img src={turfImage} alt="Four section college turf under stadium lights" />
-          <div className="turf-overlay">
-            {settings.sections.map((section, index) => {
-              const sectionBookings = selectedDateBookings.filter((booking) => booking.section === section).length;
-              return (
-                <div className="turf-quadrant" key={section} style={{ '--delay': `${index * 120}ms` }}>
-                  <strong>{section.replace('Section ', '')}</strong>
-                  <span>{sectionBookings}/{slots.length}</span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </section>}
+      {dashboardMode === 'admin' && <OwnerDashboard bookings={activeBookings} onMarkPaid={markBookingPaid} />}
 
       <section className="summary-strip">
         <Metric icon={<LayoutGrid size={20} />} label="Sections" value={settings.sections.length} tone="green" />
@@ -856,8 +852,9 @@ function App() {
           settings={settings}
           onClose={() => setShowSettings(false)}
           onSave={async (nextSettings) => {
-            await saveSettings(nextSettings);
-            setShowSettings(false);
+            const saved = await saveSettings(nextSettings);
+            if (saved) setShowSettings(false);
+            return saved;
           }}
         />
       )}
@@ -1245,6 +1242,8 @@ function BookingModal({ settings, selectedSlot, activeDate, currentUser, onClose
 
 function SettingsModal({ settings, onClose, onSave }) {
   const [draft, setDraft] = useState(settings);
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
 
   function setNumber(key, value) {
     setDraft((current) => ({ ...current, [key]: Number(value) }));
@@ -1258,7 +1257,7 @@ function SettingsModal({ settings, onClose, onSave }) {
     setDraft((current) => ({ ...current, [key]: items }));
   }
 
-  function handleSubmit(event) {
+  async function handleSubmit(event) {
     event.preventDefault();
     const safeSettings = {
       ...draft,
@@ -1273,7 +1272,16 @@ function SettingsModal({ settings, onClose, onSave }) {
       sports: draft.sports.length ? draft.sports : DEFAULT_SETTINGS.sports,
       maintenanceDates: draft.maintenanceDates || [],
     };
-    onSave(safeSettings);
+    setSaving(true);
+    setError('');
+    try {
+      const saved = await onSave(safeSettings);
+      if (!saved) setError('Settings were not saved. Check the server connection and try again.');
+    } catch (saveError) {
+      setError(saveError.message || 'Settings could not be saved.');
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
@@ -1340,11 +1348,13 @@ function SettingsModal({ settings, onClose, onSave }) {
           <input value={draft.adminPin} onChange={(event) => setDraft((current) => ({ ...current, adminPin: event.target.value }))} />
         </label>
 
+        {error && <p className="form-error" role="alert">{error}</p>}
+
         <div className="modal-actions">
           <button className="ghost-button" type="button" onClick={onClose}>Cancel</button>
-          <button className="primary-button" type="submit">
+          <button className="primary-button" type="submit" disabled={saving}>
             <Save size={18} />
-            <span>Save Settings</span>
+            <span>{saving ? 'Saving' : 'Save Settings'}</span>
           </button>
         </div>
       </form>
