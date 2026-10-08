@@ -542,15 +542,17 @@ function App() {
     };
     const headers = [
       'Booking ID',
-      'Student Name',
-      'Phone',
-      'College ID',
-      'Sport',
-      'Date',
-      'Time',
+      'Booking Date',
+      'Start Time',
+      'End Time',
       'Section',
+      'Sport',
+      'Student Name',
+      'Phone Number',
+      'College ID',
       'Players',
       'Price (INR)',
+      'Payment Mode',
       'Payment Status',
       'Booking Status',
       'Notes',
@@ -558,16 +560,22 @@ function App() {
     ];
     const rows = bookings.map((booking) => [
       booking.id,
+      formatDate(booking.date),
+      formatHour(booking.startHour),
+      formatHour(booking.endHour),
+      booking.section,
+      booking.sport,
       booking.playerName,
       booking.phone,
       booking.collegeId,
-      booking.sport,
-      formatDate(booking.date),
-      `${formatHour(booking.startHour)} - ${formatHour(booking.endHour)}`,
-      booking.section,
       csvNumber(booking.teamSize),
       csvNumber(booking.price),
-      booking.paymentStatus === 'paid' ? 'Paid' : booking.paymentStatus === 'refunded' ? 'Refunded' : 'Unpaid',
+      booking.paymentMode || 'Pay at venue',
+      booking.paymentStatus === 'paid'
+        ? 'Paid'
+        : booking.paymentStatus === 'refunded' || booking.paymentStatus === 'cancelled'
+          ? 'Refunded'
+          : 'Unpaid',
       booking.cancelledAt ? 'Cancelled' : 'Confirmed',
       booking.notes,
       booking.createdAt && Number.isFinite(new Date(booking.createdAt).getTime())
