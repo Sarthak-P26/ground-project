@@ -149,12 +149,8 @@ function datePlus(days) {
 function App() {
   const [settings, setSettings] = useState(() => loadJson(STORAGE_KEYS.settings, DEFAULT_SETTINGS));
   const [bookings, setBookings] = useState(() => loadJson(STORAGE_KEYS.bookings, []));
-  const [currentUser, setCurrentUser] = useState(() => (
-    loadJson(STORAGE_KEYS.token, '') ? loadJson(STORAGE_KEYS.user, null) : null
-  ));
-  const [accountRole, setAccountRole] = useState(() => (
-    loadJson(STORAGE_KEYS.user, null)?.role === 'owner' ? 'owner' : 'student'
-  ));
+  const [currentUser, setCurrentUser] = useState(null);
+  const [sessionLoading, setSessionLoading] = useState(() => Boolean(loadJson(STORAGE_KEYS.token, '')));
   const [authRole, setAuthRole] = useState('student');
   const [authMode, setAuthMode] = useState(() => new URLSearchParams(window.location.search).get('reset') ? 'reset' : 'home');
   const [authError, setAuthError] = useState('');
@@ -174,7 +170,7 @@ function App() {
   const [showProfile, setShowProfile] = useState(false);
 
   const slots = useMemo(() => makeTimeSlots(settings), [settings]);
-  const isOwner = accountRole === 'owner';
+  const isOwner = currentUser?.role === 'owner';
   const today = toDateInput(new Date());
   const quickDates = useMemo(() => Array.from({ length: 7 }, (_, index) => datePlus(index)), []);
   const latestBookingDate = useMemo(() => {
@@ -204,13 +200,17 @@ function App() {
 
   useEffect(() => {
     const token = loadJson(STORAGE_KEYS.token, '');
-    if (!token) return;
+    if (!token) {
+      setSessionLoading(false);
+      return;
+    }
     fetch('/api/auth/session', { headers: authHeaders() })
       .then(async (response) => {
         if (!response.ok) throw new Error('expired');
         const { user } = await response.json();
+        if (!user || !['student', 'owner'].includes(user.role)) throw new Error('invalid-role');
         setCurrentUser(user);
-        setAccountRole(user.role === 'owner' ? 'owner' : 'student');
+        saveJson(STORAGE_KEYS.user, user);
       })
       .catch(() => {
         localStorage.removeItem(STORAGE_KEYS.token);
@@ -218,6 +218,9 @@ function App() {
         setCurrentUser(null);
         setAuthMode('login');
         setAuthNotice('Your session expired. Please log in again.');
+      })
+      .finally(() => {
+        setSessionLoading(false);
       });
   }, []);
 
@@ -389,7 +392,6 @@ function App() {
   function applyAuthenticatedSession(user, store, sessionToken) {
     const mergedSettings = { ...DEFAULT_SETTINGS, ...(store?.settings || settings) };
     setCurrentUser(user);
-    setAccountRole(user.role === 'owner' ? 'owner' : 'student');
     setSettings(mergedSettings);
     setBookings(store?.bookings || bookings);
     saveJson(STORAGE_KEYS.user, user);
@@ -428,6 +430,10 @@ function App() {
         setAuthError('The server did not create a login session. Please try again.');
         return false;
       }
+      if (!result.user || !['student', 'owner'].includes(result.user.role)) {
+        setAuthError('The server did not return a valid account role. Please try again.');
+        return false;
+      }
       applyAuthenticatedSession(result.user, result.store, result.sessionToken);
       setSyncStatus('Live');
       return true;
@@ -448,8 +454,8 @@ function App() {
     }
     localStorage.removeItem(STORAGE_KEYS.user);
     localStorage.removeItem(STORAGE_KEYS.token);
+    sessionStorage.removeItem('turf-admin');
     setCurrentUser(null);
-    setAccountRole('student');
     setAuthMode('home');
   }
 
@@ -505,6 +511,9 @@ function App() {
   }
 
   if (!currentUser) {
+    if (sessionLoading) {
+      return <main className="app-shell" role="status">Checking your session…</main>;
+    }
     return (
       <AuthExperience
         authMode={authMode}
