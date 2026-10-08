@@ -330,6 +330,7 @@ function App() {
       paymentMode: 'Pay at venue',
       paymentStatus: 'unpaid',
       notes: String(get('notes') || '').trim(),
+      price: selectedSlot.price ?? settings.price,
       createdAt: new Date().toISOString(),
     };
 
