@@ -1,9 +1,11 @@
 import express from 'express';
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import 'dotenv/config';
 import admin from 'firebase-admin';
+import nodemailer from 'nodemailer';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express(); const PORT = process.env.PORT || 4173;
@@ -19,7 +21,18 @@ function publicRtdbRef(path = '') {
 let db;
 if (hasServiceAccount) { admin.initializeApp({ credential: admin.credential.cert({ projectId: process.env.FIREBASE_PROJECT_ID, clientEmail: process.env.FIREBASE_CLIENT_EMAIL, privateKey }), databaseURL: databaseUrl }); db = admin.database(); }
 else if (databaseUrl && process.env.FIREBASE_ALLOW_PUBLIC_REST === 'true') { db = { ref: publicRtdbRef }; console.warn('Using public RTDB REST demo mode. Add service-account credentials before production.'); }
-else throw new Error('Firebase credentials are missing. Set all FIREBASE_* values, or set FIREBASE_ALLOW_PUBLIC_REST=true only for a public academic-demo database.');
+else console.warn('Firebase credentials are missing; using data/store.json for app data.');
+const smtpUser = process.env.SMTP_USER;
+const smtpAppPassword = process.env.SMTP_APP_PASSWORD?.replace(/\s/g, '');
+const smtpPort = Number(process.env.SMTP_PORT || 465);
+const mailTransport = smtpUser && smtpAppPassword
+  ? nodemailer.createTransport({
+      host: process.env.SMTP_HOST || 'smtp.gmail.com',
+      port: smtpPort,
+      secure: process.env.SMTP_SECURE ? process.env.SMTP_SECURE === 'true' : smtpPort === 465,
+      auth: { user: smtpUser, pass: smtpAppPassword },
+    })
+  : null;
 app.use(express.json());
 const list = (v) => Array.isArray(v) ? v : Object.values(v || {});
 const normalizeBooking = (booking = {}) => ({
@@ -32,11 +45,55 @@ const normalizeStore = (store = {}) => ({
   bookings: list(store.bookings || []).map(normalizeBooking),
   users: list(store.users || []),
 });
-async function readStore() { const [s, b, u] = await Promise.all(['settings', 'bookings', 'users'].map((node) => db.ref(node).once('value'))); return normalizeStore({ settings: s.val() || {}, bookings: b.val() || [], users: u.val() || [] }); }
+const storePath = path.join(__dirname, 'data', 'store.json');
+async function readFileStore() {
+  try {
+    return normalizeStore(JSON.parse(await fs.readFile(storePath, 'utf8')));
+  } catch (error) {
+    if (error.code === 'ENOENT') return normalizeStore(defaults);
+    throw error;
+  }
+}
+async function readStore() {
+  const fileStore = await readFileStore();
+  if (!db) return fileStore;
+  const [settings, bookings, users] = await Promise.all(['settings', 'bookings', 'users'].map((node) => db.ref(node).once('value')));
+  const mergedUsers = new Map(list(users.val() || []).map((user) => [user.id, user]));
+  for (const user of fileStore.users) mergedUsers.set(user.id, user);
+  return normalizeStore({
+    settings: settings.val() || {},
+    bookings: bookings.val() || [],
+    users: [...mergedUsers.values()],
+  });
+}
 const rainyPattern = (date, hour = 18) => { const d = new Date(`${date}T${String(hour).padStart(2, '0')}:00:00`).getTime() / 86400000, p = Math.max(8, Math.min(92, Math.round(36 + (Math.sin(d * .74) + Math.sin(d * .21)) * 25))); return { probability: p, risk: p >= 65 ? 'High' : p >= 35 ? 'Medium' : 'Low', source: 'demo forecast' }; };
 async function weatherRisk(date, hour) { if (!process.env.OPENWEATHER_API_KEY) return rainyPattern(date, hour); try { const r = await fetch(`https://api.openweathermap.org/data/2.5/forecast?q=Delhi,IN&appid=${process.env.OPENWEATHER_API_KEY}`), j = await r.json(), target = new Date(`${date}T${String(hour).padStart(2, '0')}:00:00`).getTime(), items = j.list || [], item = items.filter((x) => x.dt_txt?.startsWith(date)).sort((a, b) => Math.abs(new Date(a.dt_txt).getTime() - target) - Math.abs(new Date(b.dt_txt).getTime() - target))[0]; if (!item) return rainyPattern(date, hour); const p = Math.round((item.pop || 0) * 100); return { probability: p, risk: p >= 65 ? 'High' : p >= 35 ? 'Medium' : 'Low', source: 'OpenWeatherMap' }; } catch { return rainyPattern(date, hour); } }
 function demandScore(bookings, date, hour, section, risk) { const target = new Date(`${date}T00:00:00`); const weighted = bookings.filter((b) => b.section === section && Number(b.startHour) === Number(hour) && new Date(`${b.date}T00:00:00`).getDay() === target.getDay() && !b.cancelledAt).reduce((n, b) => n + Math.max(.2, 1 - Math.max(0, (target - new Date(`${b.date}T00:00:00`)) / 86400000) / 220), 0); return Math.min(100, Math.round(weighted * 16 * (risk === 'High' ? .65 : risk === 'Medium' ? .82 : 1))); }
-async function writeStore(store) { await db.ref().update({ settings: store.settings, bookings: store.bookings, users: store.users }); }
+async function writeFileStore(store) {
+  await fs.mkdir(path.dirname(storePath), { recursive: true });
+  const temporaryPath = `${storePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  await fs.writeFile(temporaryPath, `${JSON.stringify(store, null, 2)}\n`, 'utf8');
+  await fs.rename(temporaryPath, storePath);
+}
+async function writeStore(store) {
+  if (!db) return writeFileStore(store);
+  await db.ref().update({ settings: store.settings, bookings: store.bookings, users: store.users });
+}
+async function writeUsers(users) {
+  const store = await readFileStore();
+  store.users = users;
+  await writeFileStore(store);
+}
+let storeMutationQueue = Promise.resolve();
+function withStoreLock(operation) {
+  const result = storeMutationQueue.then(operation, operation);
+  storeMutationQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
+async function readHistoricalBookings() {
+  if (!db) return [];
+  return list((await db.ref('historicalBookings').once('value')).val());
+}
 const slots = (s) => { const out = []; for (let h = s.openHour; h + s.durationHours <= s.closeHour; h += s.durationHours) out.push(h); return out; };
 const today = () => new Date().toISOString().slice(0, 10);
 const hash = (p, salt = crypto.randomBytes(16).toString('hex')) => `${salt}:${crypto.scryptSync(p, salt, 64).toString('hex')}`;
@@ -54,15 +111,149 @@ const route = (fn) => async (req, res, next) => { try { await fn(req, res); } ca
 
 app.get('/api/store', route(async (_req, res) => res.json(publicStore(await readStore()))));
 app.get('/api/weather-risk', route(async (req, res) => res.json(await weatherRisk(String(req.query.date || today()), Number(req.query.hour || 18)))));
-app.get('/api/forecast', route(async (_req, res) => { const store = await readStore(), historical = list((await db.ref('historicalBookings').once('value')).val()), data = []; for (let day = 0; day < 7; day += 1) { const d = new Date(); d.setDate(d.getDate() + day); const date = d.toISOString().slice(0, 10), risk = await weatherRisk(date, 18), values = store.settings.sections.flatMap((section) => slots(store.settings).map((hour) => demandScore([...historical, ...store.bookings], date, hour, section, risk.risk))); data.push({ date, label: d.toLocaleDateString('en-IN', { weekday: 'short' }), demand: Math.round(values.reduce((a, b) => a + b, 0) / Math.max(values.length, 1)), risk: risk.risk }); } res.json(data); }));
-app.get('/api/price-suggestions', route(async (req, res) => { const store = await readStore(), date = String(req.query.date || today()), historical = list((await db.ref('historicalBookings').once('value')).val()), all = [...historical, ...store.bookings], result = {}; for (const section of store.settings.sections) { const scores = []; for (const hour of slots(store.settings)) { const risk = await weatherRisk(date, hour); scores.push(demandScore(all, date, hour, section, risk.risk)); } const demand = Math.round(scores.reduce((a, b) => a + b, 0) / Math.max(scores.length, 1)); const multiplier = demand >= 70 ? 1.18 : demand <= 30 ? .9 : 1; result[section] = { demand, suggestedPrice: Math.round(store.settings.price * multiplier), recommendation: multiplier > 1 ? 'High demand' : multiplier < 1 ? 'Low demand' : 'Base price' }; } res.json(result); }));
-app.post('/api/auth/signup', route(async (req, res) => { const store = await readStore(), name = String(req.body.name || '').trim(), email = normalizeEmail(req.body.email), phone = normalizePhone(req.body.phone), password = String(req.body.password || ''); if (!name || !email || !phone || !password) return res.status(400).json({ message: 'Name, email, phone, and password are required.' }); if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ message: 'Enter a valid email address.' }); if (!/^[6-9]\d{9}$/.test(phone)) return res.status(400).json({ message: 'Enter a valid 10-digit Indian phone number.' }); if (password.length < 6) return res.status(400).json({ message: 'Password must be at least 6 characters.' }); if (store.users.some((u) => normalizeEmail(u.email) === email || normalizePhone(u.phone) === phone)) return res.status(409).json({ message: 'An account already exists with this email or phone.' }); const user = { id: `USR-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`, name, email, phone, collegeId: String(req.body.collegeId || '').trim(), passwordHash: hash(password), createdAt: new Date().toISOString() }; store.users.push(user); await writeStore(store); res.status(201).json({ user: publicUser(user), store: publicStore(store) }); }));
-app.post('/api/auth/login', route(async (req, res) => { const store = await readStore(), id = normalizeIdentifier(req.body.identifier), user = store.users.find((u) => normalizeEmail(u.email) === id || normalizePhone(u.phone) === id); if (!user || !matches(String(req.body.password || ''), user.passwordHash)) return res.status(401).json({ message: 'Incorrect email/phone or password. Please try again.' }); res.json({ user: publicUser(user), store: publicStore(store) }); }));
-app.post('/api/auth/forgot-password', route(async (req, res) => { const store = await readStore(), identifier = normalizeIdentifier(req.body.identifier), user = store.users.find((u) => normalizeEmail(u.email) === identifier || normalizePhone(u.phone) === identifier); if (!user) return res.status(200).json({ message: 'If an account exists, a reset link will be prepared in demo mode.', resetToken: '', resetLink: '' }); const token = crypto.randomBytes(24).toString('hex'), reset = { token, userId: user.id, expiresAt: Date.now() + 15 * 60 * 1000, createdAt: new Date().toISOString() }; await db.ref(`passwordResets/${token}`).set(reset); const resetLink = `${req.protocol}://${req.get('host')}/?reset=${token}`; res.json({ resetToken: token, resetLink, message: 'Demo mode: in production this would be emailed.' }); }));
-app.post('/api/auth/reset-password', route(async (req, res) => { const token = String(req.body.token || ''), password = String(req.body.password || ''); if (password.length < 6) return res.status(400).json({ message: 'Password must be at least 6 characters.' }); const resetRef = db.ref(`passwordResets/${token}`), snap = await resetRef.once('value'), reset = snap.val(); if (!reset || Date.now() > Number(reset.expiresAt)) return res.status(400).json({ message: 'This reset link is invalid or has expired.' }); const store = await readStore(), user = store.users.find((u) => u.id === reset.userId); if (!user) return res.status(404).json({ message: 'Account not found.' }); user.passwordHash = hash(password); await Promise.all([writeStore(store), resetRef.remove()]); res.json({ message: 'Password reset. You can now log in.' }); }));
+app.get('/api/forecast', route(async (_req, res) => {
+  const store = await readStore();
+  const historical = await readHistoricalBookings();
+  const data = [];
+  for (let day = 0; day < 7; day += 1) {
+    const dateValue = new Date();
+    dateValue.setDate(dateValue.getDate() + day);
+    const date = dateValue.toISOString().slice(0, 10);
+    const risk = await weatherRisk(date, 18);
+    const values = store.settings.sections.flatMap((section) =>
+      slots(store.settings).map((hour) => demandScore([...historical, ...store.bookings], date, hour, section, risk.risk)),
+    );
+    data.push({
+      date,
+      label: dateValue.toLocaleDateString('en-IN', { weekday: 'short' }),
+      demand: Math.round(values.reduce((a, b) => a + b, 0) / Math.max(values.length, 1)),
+      risk: risk.risk,
+    });
+  }
+  res.json(data);
+}));
+app.get('/api/price-suggestions', route(async (req, res) => {
+  const store = await readStore();
+  const date = String(req.query.date || today());
+  const historical = await readHistoricalBookings();
+  const all = [...historical, ...store.bookings];
+  const result = {};
+  for (const section of store.settings.sections) {
+    const scores = [];
+    for (const hour of slots(store.settings)) {
+      const risk = await weatherRisk(date, hour);
+      scores.push(demandScore(all, date, hour, section, risk.risk));
+    }
+    const demand = Math.round(scores.reduce((a, b) => a + b, 0) / Math.max(scores.length, 1));
+    const multiplier = demand >= 70 ? 1.18 : demand <= 30 ? .9 : 1;
+    result[section] = {
+      demand,
+      suggestedPrice: Math.round(store.settings.price * multiplier),
+      recommendation: multiplier > 1 ? 'High demand' : multiplier < 1 ? 'Low demand' : 'Base price',
+    };
+  }
+  res.json(result);
+}));
+app.post('/api/auth/signup', route(async (req, res) => {
+  const result = await withStoreLock(async () => {
+    const store = await readStore();
+    const name = String(req.body.name || '').trim();
+    const email = normalizeEmail(req.body.email);
+    const phone = normalizePhone(req.body.phone);
+    const password = String(req.body.password || '');
+    if (!name || !email || !phone || !password) return { status: 400, body: { message: 'Name, email, phone, and password are required.' } };
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { status: 400, body: { message: 'Enter a valid email address.' } };
+    if (!/^[6-9]\d{9}$/.test(phone)) return { status: 400, body: { message: 'Enter a valid 10-digit Indian phone number.' } };
+    if (password.length < 6) return { status: 400, body: { message: 'Password must be at least 6 characters.' } };
+    if (store.users.some((user) => normalizeEmail(user.email) === email || normalizePhone(user.phone) === phone)) {
+      return { status: 409, body: { message: 'An account is already registered with this email or phone number.' } };
+    }
+    const user = {
+      id: `USR-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`,
+      name,
+      email,
+      phone,
+      collegeId: String(req.body.collegeId || '').trim(),
+      passwordHash: hash(password),
+      createdAt: new Date().toISOString(),
+    };
+    const sessionToken = crypto.randomBytes(32).toString('hex');
+    store.users.push(user);
+    await writeUsers(store.users);
+    return { status: 201, body: { user: publicUser(user), store: publicStore(store), sessionToken } };
+  });
+  res.status(result.status).json(result.body);
+}));
+app.post('/api/auth/login', route(async (req, res) => {
+  const store = await readStore();
+  const identifier = normalizeIdentifier(req.body.identifier);
+  const user = store.users.find((record) => normalizeEmail(record.email) === identifier || normalizePhone(record.phone) === identifier);
+  if (!user || !matches(String(req.body.password || ''), user.passwordHash)) {
+    return res.status(401).json({ message: 'Incorrect email/phone or password. Please try again.' });
+  }
+  res.json({ user: publicUser(user), store: publicStore(store), sessionToken: crypto.randomBytes(32).toString('hex') });
+}));
+app.post('/api/auth/forgot-password', route(async (req, res) => {
+  if (!mailTransport) {
+    return res.status(503).json({
+      message: 'Password email is not configured. Add SMTP_USER and SMTP_APP_PASSWORD to the server .env file.',
+    });
+  }
+  const reset = await withStoreLock(async () => {
+    const store = await readStore();
+    const identifier = normalizeIdentifier(req.body.identifier);
+    const user = store.users.find((record) => normalizeEmail(record.email) === identifier || normalizePhone(record.phone) === identifier);
+    if (!user) return null;
+    const token = crypto.randomBytes(24).toString('hex');
+    user.passwordReset = { token, expiresAt: Date.now() + 15 * 60 * 1000, createdAt: new Date().toISOString() };
+    await writeUsers(store.users);
+    return { userId: user.id, email: user.email, token };
+  });
+  if (reset) {
+    const baseUrl = (process.env.APP_BASE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+    const resetLink = `${baseUrl}/?reset=${encodeURIComponent(reset.token)}`;
+    try {
+      await mailTransport.sendMail({
+        from: { name: 'TurfCast', address: smtpUser },
+        to: reset.email,
+        subject: 'Reset your TurfCast password',
+        text: `We received a request to reset your TurfCast password. This link expires in 15 minutes:\n\n${resetLink}\n\nIf you did not request a reset, you can ignore this email.`,
+        html: `<p>We received a request to reset your TurfCast password.</p><p><a href="${resetLink}">Reset your password</a></p><p>This link expires in 15 minutes. If you did not request a reset, you can ignore this email.</p>`,
+      });
+    } catch (error) {
+      console.error('Password reset email delivery failed:', error);
+      await withStoreLock(async () => {
+        const store = await readStore();
+        const user = store.users.find((record) => record.id === reset.userId);
+        if (user?.passwordReset?.token === reset.token) {
+          delete user.passwordReset;
+          await writeUsers(store.users);
+        }
+      });
+      return res.status(502).json({ message: 'Could not send the password reset email. Check the Gmail SMTP configuration and try again.' });
+    }
+  }
+  res.json({ message: 'If an account with that email or phone exists, a password reset email has been sent.' });
+}));
+app.post('/api/auth/reset-password', route(async (req, res) => {
+  const token = String(req.body.token || '');
+  const password = String(req.body.password || '');
+  if (password.length < 6) return res.status(400).json({ message: 'Password must be at least 6 characters.' });
+  const result = await withStoreLock(async () => {
+    const store = await readStore();
+    const user = store.users.find((record) => record.passwordReset?.token === token);
+    if (!user || Date.now() >= Number(user.passwordReset.expiresAt)) return null;
+    user.passwordHash = hash(password);
+    delete user.passwordReset;
+    await writeUsers(store.users);
+    return true;
+  });
+  if (!result) return res.status(400).json({ message: 'This reset link is invalid or has expired.' });
+  res.json({ message: 'Password reset. You can now log in.' });
+}));
 app.put('/api/settings', route(async (req, res) => { const store = await readStore(), old = store.settings; store.settings = { ...old, ...req.body, price: Math.max(1, Number(req.body.price)), durationHours: Math.max(1, Number(req.body.durationHours)), openHour: Math.max(0, Math.min(23, Number(req.body.openHour))), closeHour: Math.max(1, Math.min(24, Number(req.body.closeHour))), sections: Array.isArray(req.body.sections) && req.body.sections.length ? req.body.sections : old.sections, sports: Array.isArray(req.body.sports) && req.body.sports.length ? req.body.sports : old.sports, bookingWindowDays: Math.max(1, Number(req.body.bookingWindowDays || old.bookingWindowDays)), maxActiveBookingsPerPhone: Math.max(1, Number(req.body.maxActiveBookingsPerPhone || old.maxActiveBookingsPerPhone)), adminPin: String(req.body.adminPin || old.adminPin), maintenanceDates: Array.isArray(req.body.maintenanceDates) ? req.body.maintenanceDates : old.maintenanceDates }; await writeStore(store); res.json(publicStore(store)); }));
 app.post('/api/bookings', route(async (req, res) => { const store = await readStore(), s = store.settings; const b = { ...req.body, id: req.body.id || `BK-${Date.now().toString(36).toUpperCase()}`, playerName: String(req.body.playerName || '').trim(), phone: String(req.body.phone || '').trim(), collegeId: String(req.body.collegeId || '').trim(), bookedBy: String(req.body.bookedBy || '').trim(), paymentMode: 'Pay at venue', paymentStatus: 'unpaid', price: Number(s.price), startHour: Number(req.body.startHour), endHour: Number(req.body.startHour) + Number(s.durationHours), teamSize: Number(req.body.teamSize || 1), createdAt: req.body.createdAt || new Date().toISOString() }; if (!b.date || !b.section || !b.playerName || !b.phone) return res.status(400).json({ message: 'Missing booking details.' }); if (!/^[6-9]\d{9}$/.test(b.phone)) return res.status(400).json({ message: 'Enter a valid 10-digit Indian phone number.' }); if (!s.sections.includes(b.section) || !s.sports.includes(b.sport) || !slots(s).includes(b.startHour)) return res.status(400).json({ message: 'Invalid booking details.' }); if (s.maintenanceDates.includes(b.date)) return res.status(400).json({ message: 'This date is blocked for maintenance.' }); const last = new Date(); last.setDate(last.getDate() + Number(s.bookingWindowDays)); if (b.date < today() || b.date > last.toISOString().slice(0, 10)) return res.status(400).json({ message: `Bookings are allowed only within ${s.bookingWindowDays} days.` }); if (store.bookings.filter((x) => !x.cancelledAt && x.phone === b.phone && x.date >= today()).length >= s.maxActiveBookingsPerPhone) return res.status(400).json({ message: `This phone already has ${s.maxActiveBookingsPerPhone} active bookings.` }); if (store.bookings.some((x) => !x.cancelledAt && x.date === b.date && x.section === b.section && Number(x.startHour) === b.startHour)) return res.status(409).json({ message: 'This slot is already booked.' }); store.bookings.push(b); await writeStore(store); res.status(201).json(publicStore(store)); }));
 app.put('/api/bookings/:id/payment', route(async (req, res) => { const store = await readStore(), b = store.bookings.find((item) => item.id === req.params.id); if (!b || b.cancelledAt) return res.status(404).json({ message: 'Active booking not found.' }); b.paymentStatus = req.body.paymentStatus === 'paid' ? 'paid' : 'unpaid'; b.paymentMode = 'Pay at venue'; await writeStore(store); res.json(publicStore(store)); }));
 app.delete('/api/bookings/:id', route(async (req, res) => { const store = await readStore(), b = store.bookings.find((item) => item.id === req.params.id); if (!b) return res.status(404).json({ message: 'Booking not found.' }); b.cancelledAt = new Date().toISOString(); b.paymentStatus = 'refunded'; b.paymentMode = 'Pay at venue'; await writeStore(store); res.json(publicStore(store)); }));
-app.use((err, _req, res, _next) => { console.error(err); res.status(500).json({ message: 'Database request failed. Check Firebase configuration.' }); });
+app.use((err, _req, res, _next) => { console.error(err); res.status(500).json({ message: 'Could not read or save app data. Check data/store.json permissions and server logs.' }); });
 app.use(express.static(path.join(__dirname, 'dist'))); app.get('*', (_req, res) => res.sendFile(path.join(__dirname, 'dist', 'index.html'))); app.listen(PORT, () => console.log(`Turf booking app running at http://localhost:${PORT}`));

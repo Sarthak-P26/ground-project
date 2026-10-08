@@ -46,6 +46,7 @@ const STORAGE_KEYS = {
   bookings: 'college-turf-bookings-v1',
   settings: 'college-turf-settings-v1',
   user: 'college-turf-user-v1',
+  token: 'college-turf-session-token-v1',
 };
 
 const rootElement = document.getElementById('root');
@@ -144,10 +145,12 @@ function datePlus(days) {
 function App() {
   const [settings, setSettings] = useState(() => loadJson(STORAGE_KEYS.settings, DEFAULT_SETTINGS));
   const [bookings, setBookings] = useState(() => loadJson(STORAGE_KEYS.bookings, []));
-  const [currentUser, setCurrentUser] = useState(() => loadJson(STORAGE_KEYS.user, null));
+  const [currentUser, setCurrentUser] = useState(() => (
+    loadJson(STORAGE_KEYS.token, '') ? loadJson(STORAGE_KEYS.user, null) : null
+  ));
   const [authMode, setAuthMode] = useState(() => new URLSearchParams(window.location.search).get('reset') ? 'reset' : 'home');
-  const [demoResetLink, setDemoResetLink] = useState('');
   const [authError, setAuthError] = useState('');
+  const [authNotice, setAuthNotice] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
   const [syncStatus, setSyncStatus] = useState('Connecting');
   const [activeDate, setActiveDate] = useState(() => toDateInput(new Date()));
@@ -366,12 +369,13 @@ function App() {
     }
   }
 
-  function applyAuthenticatedSession(user, store) {
+  function applyAuthenticatedSession(user, store, sessionToken) {
     const mergedSettings = { ...DEFAULT_SETTINGS, ...(store?.settings || settings) };
     setCurrentUser(user);
     setSettings(mergedSettings);
     setBookings(store?.bookings || bookings);
     saveJson(STORAGE_KEYS.user, user);
+    saveJson(STORAGE_KEYS.token, sessionToken);
     saveJson(STORAGE_KEYS.settings, mergedSettings);
     saveJson(STORAGE_KEYS.bookings, store?.bookings || bookings);
     setAuthError('');
@@ -380,6 +384,7 @@ function App() {
   async function handleAuthSubmit(mode, payload) {
     setAuthLoading(true);
     setAuthError('');
+    setAuthNotice('');
     try {
       const response = await fetch(`/api/auth/${mode}`, {
         method: 'POST',
@@ -392,14 +397,20 @@ function App() {
         return false;
       }
       if (mode === 'forgot-password') {
-        const token = result.resetToken || new URL(result.resetLink || '', window.location.origin).searchParams.get('reset');
-        const nextResetLink = token ? `${window.location.origin}/?reset=${token}` : '';
-        setDemoResetLink(nextResetLink);
-        setAuthError(result.message || 'If an account exists, a reset link will be prepared in demo mode.');
+        setAuthNotice(result.message || 'If an account with that email or phone exists, a password reset email has been sent.');
         return true;
       }
-      if (mode === 'reset-password') { setAuthMode('login'); setAuthError(result.message || 'Password reset complete.'); return true; }
-      applyAuthenticatedSession(result.user, result.store);
+      if (mode === 'reset-password') {
+        window.history.replaceState({}, '', window.location.pathname);
+        setAuthMode('login');
+        setAuthNotice(result.message || 'Password reset complete.');
+        return true;
+      }
+      if (!result.sessionToken) {
+        setAuthError('The server did not create a login session. Please try again.');
+        return false;
+      }
+      applyAuthenticatedSession(result.user, result.store, result.sessionToken);
       setSyncStatus('Live');
       return true;
     } catch {
@@ -413,6 +424,7 @@ function App() {
 
   function logout() {
     localStorage.removeItem(STORAGE_KEYS.user);
+    localStorage.removeItem(STORAGE_KEYS.token);
     sessionStorage.removeItem('turf-admin');
     setCurrentUser(null);
     setIsAdmin(false);
@@ -458,15 +470,16 @@ function App() {
       <AuthExperience
         authMode={authMode}
         authError={authError}
+        authNotice={authNotice}
         authLoading={authLoading}
         settings={settings}
         bookings={bookings}
         onModeChange={(mode) => {
           setAuthMode(mode);
           setAuthError('');
+          setAuthNotice('');
         }}
         onSubmit={handleAuthSubmit}
-        demoResetLink={demoResetLink}
       />
     );
   }
@@ -867,7 +880,7 @@ function App() {
   );
 }
 
-function AuthExperience({ authMode, authError, authLoading, settings, bookings, onModeChange, onSubmit, demoResetLink }) {
+function AuthExperience({ authMode, authError, authNotice, authLoading, settings, bookings, onModeChange, onSubmit }) {
   const today = toDateInput(new Date());
   const todayBookings = bookings.filter((booking) => booking.date === today).length;
   const slots = makeTimeSlots(settings).length * settings.sections.length;
@@ -946,10 +959,10 @@ function AuthExperience({ authMode, authError, authLoading, settings, bookings, 
         <AuthPanel
           mode={authMode === 'home' ? 'login' : authMode}
           authError={authError}
+          authNotice={authNotice}
           authLoading={authLoading}
           onModeChange={onModeChange}
           onSubmit={onSubmit}
-          demoResetLink={demoResetLink}
         />
       </section>
       <section className="auth-product-band">
@@ -1021,7 +1034,7 @@ function AuthStat({ label, value }) {
   );
 }
 
-function AuthPanel({ mode, authError, authLoading, onModeChange, onSubmit, demoResetLink }) {
+function AuthPanel({ mode, authError, authNotice, authLoading, onModeChange, onSubmit }) {
   const isSignup = mode === 'signup';
   const panelTitle = mode === 'forgot' ? 'Reset your TurfCast password' : mode === 'reset' ? 'Choose a new password' : isSignup ? 'Create your TurfCast account' : 'Login to book your slot';
   const panelKicker = mode === 'forgot' ? 'Account Recovery' : mode === 'reset' ? 'Secure Reset' : isSignup ? 'New Player' : 'Welcome Back';
@@ -1036,7 +1049,7 @@ function AuthPanel({ mode, authError, authLoading, onModeChange, onSubmit, demoR
   }
 
   return (
-    <form className="auth-panel" onSubmit={handleSubmit}>
+    <form key={mode} className="auth-panel" onSubmit={handleSubmit}>
       <div className="auth-panel-head">
         <div className="auth-icon">
           {isSignup ? <UserPlus size={22} /> : <LogIn size={22} />}
@@ -1047,7 +1060,7 @@ function AuthPanel({ mode, authError, authLoading, onModeChange, onSubmit, demoR
         </div>
       </div>
 
-      {mode === 'forgot' ? <><label>Email or Phone<div className="input-with-icon"><Mail size={18} /><input name="identifier" type="text" placeholder="email or phone" /></div></label>{demoResetLink ? <p className="demo-link">Demo mode: in production this would be emailed. <a href={demoResetLink}>Open reset link</a></p> : <p className="demo-link">If an account exists, a reset link will be prepared in demo mode.</p>}</> : mode === 'reset' ? <label>New Password<div className="input-with-icon"><Lock size={18} /><input name="password" type="password" placeholder="At least 6 characters" /></div></label> : isSignup ? (
+      {mode === 'forgot' ? <><label>Email or Phone<div className="input-with-icon"><Mail size={18} /><input name="identifier" type="text" placeholder="email or phone" /></div></label><p className="demo-link">{authNotice || 'We’ll email a password reset link to the address on your account.'}</p></> : mode === 'reset' ? <label>New Password<div className="input-with-icon"><Lock size={18} /><input name="password" type="password" placeholder="At least 6 characters" /></div></label> : isSignup ? (
         <>
           <label>
             Full Name
@@ -1097,10 +1110,11 @@ function AuthPanel({ mode, authError, authLoading, onModeChange, onSubmit, demoR
       </label>}
 
       {authError && <p className="form-error">{authError}</p>}
+      {authNotice && mode !== 'forgot' && <p className="demo-link">{authNotice}</p>}
 
       <button className="primary-button glow-button auth-submit" type="submit" disabled={authLoading}>
         {isSignup ? <UserPlus size={18} /> : <LogIn size={18} />}
-        <span>{authLoading ? 'Working' : mode === 'forgot' ? 'Create reset link' : mode === 'reset' ? 'Set new password' : isSignup ? 'Create Account' : 'Login'}</span>
+        <span>{authLoading ? 'Working' : mode === 'forgot' ? 'Send reset email' : mode === 'reset' ? 'Set new password' : isSignup ? 'Create Account' : 'Login'}</span>
       </button>
 
       <p className="auth-switch">

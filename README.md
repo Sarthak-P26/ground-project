@@ -7,6 +7,7 @@ A full web app for booking a college turf split into four playable sections. It 
 - Four-section turf schedule for cricket and football
 - Premium home page with login and signup
 - File-backed user accounts with hashed passwords
+- Password recovery emails with one-time links that expire after 15 minutes
 - Three-hour slots at Rs. 600 by default
 - Configurable price, duration, open hours, close hours, sports, and section names
 - Shared Node API with file-backed storage in `data/store.json`
@@ -34,6 +35,16 @@ npm start
 Open `http://localhost:4173`.
 
 Create an account from the home page, then log in to enter the booking console.
+
+### Configure Gmail password recovery
+
+Password reset emails use Gmail SMTP. In `.env`, set `SMTP_USER` to the Gmail address
+that will send messages and `SMTP_APP_PASSWORD` to a Google App Password for that
+account (requires 2-Step Verification). Do not use your normal Gmail password or
+commit `.env`. `APP_BASE_URL` should be the public URL users visit; it defaults to
+`http://localhost:4173`. Restart the server after changing these settings. Until SMTP
+credentials are configured, password recovery will report that email is unavailable
+instead of implying that a message was sent.
 
 ## Change Rules
 
