@@ -1322,7 +1322,6 @@ function OwnerExperience({
         settings={settings}
         priceOverrides={priceOverrides}
         slots={slots}
-        onManageSettings={onOpenSettings}
         onSaveDefaultPrice={onSaveDefaultPrice}
         onSavePriceOverride={onSavePriceOverride}
         onDeactivatePriceOverride={onDeactivatePriceOverride}
@@ -1544,7 +1543,6 @@ function OwnerPricing({
   settings,
   priceOverrides,
   slots,
-  onManageSettings,
   onSaveDefaultPrice,
   onSavePriceOverride,
   onDeactivatePriceOverride,
@@ -1762,7 +1760,6 @@ function OwnerPricing({
         </div> : <p className="owner-empty-note">No custom slot prices are active in the booking window.</p>}
       </section>
       {notice && <p className="owner-pricing-notice" role="status">{notice}</p>}
-      <button className="ghost-button owner-pricing-settings-link" type="button" onClick={onManageSettings}><Settings size={17} />Turf settings</button>
     </div>
   );
 }
