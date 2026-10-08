@@ -167,6 +167,7 @@ function App() {
   const [selectedSlot, setSelectedSlot] = useState(null);
   const [forecast, setForecast] = useState([]);
   const [receiptBooking, setReceiptBooking] = useState(null);
+  const [bookingConfirmed, setBookingConfirmed] = useState(false);
   const [search, setSearch] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [sportFilter, setSportFilter] = useState('All');
@@ -182,9 +183,6 @@ function App() {
     return toDateInput(date);
   }, [settings.bookingWindowDays]);
   const activeBookings = bookings.filter((booking) => !booking.cancelledAt);
-  const selectedDateBookings = activeBookings
-    .filter((booking) => booking.date === activeDate)
-    .sort((a, b) => a.startHour - b.startHour || a.section.localeCompare(b.section));
 
   const myBookings = currentUser
     ? bookings
@@ -203,12 +201,6 @@ function App() {
         .includes(q);
     })
     .sort((a, b) => `${b.date}-${b.startHour}`.localeCompare(`${a.date}-${a.startHour}`));
-
-  const totalCapacity = settings.sections.length * slots.length;
-  const bookedCount = selectedDateBookings.length;
-  const availableCount = Math.max(totalCapacity - bookedCount, 0);
-  const myNextBooking = myBookings.find((booking) => !booking.cancelledAt && isFutureOrToday(booking.date));
-  const utilization = totalCapacity ? Math.round((bookedCount / totalCapacity) * 100) : 0;
 
   useEffect(() => {
     const token = loadJson(STORAGE_KEYS.token, '');
@@ -324,6 +316,7 @@ function App() {
       persistBookings(store.bookings);
       persistSettings(store.settings);
       setReceiptBooking(store.bookings.find((booking) => booking.id === nextBooking.id) || nextBooking);
+      setBookingConfirmed(true);
       setSyncStatus('Live');
     } catch {
       setSyncStatus('Offline');
@@ -533,7 +526,7 @@ function App() {
   }
 
   return (
-    <main className="app-shell product-shell">
+    <main className={`app-shell product-shell ${isOwner ? 'owner-experience' : 'student-experience'}`}>
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark">
@@ -576,40 +569,8 @@ function App() {
         </>}
       </nav>
 
-      {!isOwner && <section className="command-deck" id="overview">
-        <div className="deck-copy">
-          <div className="auth-kicker">
-            <Activity size={16} />
-            <span>Live command center</span>
-          </div>
-          <h2>Welcome back, {currentUser.name.split(' ')[0]}.</h2>
-          <p>Today’s turf load is at {utilization}%. Pick a clean window, keep your team moving, and avoid the last-minute chaos.</p>
-        </div>
-        <div className="deck-card next">
-          <span>Your Next Slot</span>
-          {myNextBooking ? (
-            <>
-              <strong>{myNextBooking.section}</strong>
-              <p>{formatDate(myNextBooking.date)} · {formatHour(myNextBooking.startHour)}</p>
-            </>
-          ) : (
-            <>
-              <strong>No slot yet</strong>
-              <p>Grab a section before the prime hours disappear.</p>
-            </>
-          )}
-        </div>
-        <div className="deck-card pulse">
-          <span>Ground Pulse</span>
-          <strong>{availableCount} open</strong>
-          <div className="pulse-ring" style={{ '--usage': `${utilization}%` }}>
-            <Activity size={22} />
-          </div>
-        </div>
-      </section>}
-
       <section className="simple-welcome">
-        <div><p>{isOwner ? 'Turf Admin / Owner' : 'Student Booking'}</p><h2>{isOwner ? 'Manage your college turf.' : `Hi ${currentUser.name.split(' ')[0]}, choose a time that works.`}</h2><span>{isOwner ? 'Bookings, revenue, occupancy, turf settings and business analytics.' : 'Choose a sport and date, see the price, and reserve an available slot.'}</span></div>
+        <div><p>{isOwner ? 'Turf Admin / Owner' : 'College Turf'}</p><h2>{isOwner ? 'Manage your college turf.' : 'Book your next game.'}</h2>{isOwner && <span>Bookings, revenue, occupancy, turf settings and business analytics.</span>}</div>
         <button className="primary-button" type="button" onClick={() => scrollToSection(isOwner ? 'records' : 'schedule')}><CalendarDays size={18} /><span>{isOwner ? 'View Bookings' : 'Book a Slot'}</span></button>
       </section>
 
@@ -620,17 +581,16 @@ function App() {
 
       {isOwner && <OwnerDashboard bookings={activeBookings} settings={settings} onMarkPaid={markBookingPaid} />}
 
-      {!isOwner && <><section className="summary-strip">
-        <Metric icon={<LayoutGrid size={20} />} label="Sections" value={settings.sections.length} tone="green" />
-        <Metric icon={<Clock size={20} />} label="Slot Duration" value={`${settings.durationHours} hr`} tone="blue" />
-        <Metric icon={<IndianRupee size={20} />} label="Price" value={currency(settings.price)} tone="gold" />
-        <Metric icon={<ShieldCheck size={20} />} label="Usage Today" value={`${utilization}%`} tone="red" />
-      </section>
-
-      <section className="date-runway" aria-label="Quick date selection">
+      {!isOwner && <>
+      <div className="student-sport-row">
+        <label>Sport
+          <select value={selectedSport} onChange={(event) => setSelectedSport(event.target.value)}>
+            {settings.sports.map((sport) => <option key={sport}>{sport}</option>)}
+          </select>
+        </label>
+      </div>
+      <section className="date-runway student-dates" aria-label="Choose booking date">
         {quickDates.map((date, index) => {
-          const count = activeBookings.filter((booking) => booking.date === date).length;
-          const dayCapacity = totalCapacity;
           return (
             <button
               className={`date-pill ${activeDate === date ? 'active' : ''}`}
@@ -638,76 +598,25 @@ function App() {
               key={date}
               onClick={() => setActiveDate(date)}
             >
-              <span>{index === 0 ? 'Today' : formatDate(date).split(',')[0]}</span>
+              <span>{index === 0 ? 'Today' : new Intl.DateTimeFormat('en-IN', { weekday: 'short' }).format(new Date(`${date}T00:00:00`))}</span>
               <strong>{new Date(`${date}T00:00:00`).getDate()}</strong>
-              <small>{count}/{dayCapacity} booked</small>
+              <small>{new Intl.DateTimeFormat('en-IN', { month: 'short' }).format(new Date(`${date}T00:00:00`))}</small>
             </button>
           );
         })}
+        <label className="date-picker">
+          <span>Choose another date</span>
+          <input type="date" min={today} max={latestBookingDate} value={activeDate} onChange={(event) => setActiveDate(event.target.value)} />
+        </label>
       </section>
 
-      <section className="workspace" id="schedule">
-        <aside className="side-panel">
-          <div className="date-card">
-            <label htmlFor="booking-date">Booking Date</label>
-            <div className="date-input-wrap">
-              <CalendarDays size={18} />
-              <input
-                id="booking-date"
-                type="date"
-                min={today}
-                max={latestBookingDate}
-                value={activeDate}
-                onChange={(event) => setActiveDate(event.target.value)}
-              />
-            </div>
-            <h2>{formatDate(activeDate)}</h2>
-          </div>
-
-          <div className="panel-group">
-            <h3>Day Snapshot</h3>
-            <div className="snapshot-grid">
-              <SmallStat label="Booked" value={bookedCount} />
-              <SmallStat label="Open" value={availableCount} />
-              <SmallStat label="Slots" value={totalCapacity} />
-            </div>
-          </div>
-
-          <div className="panel-group next-card">
-            <h3>Next Booking</h3>
-            {myNextBooking ? (
-              <button className="next-booking" type="button" onClick={() => setReceiptBooking(myNextBooking)}>
-                <strong>{myNextBooking.section}</strong>
-                <span>{formatDate(myNextBooking.date)} · {formatHour(myNextBooking.startHour)}</span>
-              </button>
-            ) : (
-              <p className="quiet-text">No upcoming booking in the system.</p>
-            )}
-          </div>
-
-          <div className="panel-group">
-            <h3>Rules</h3>
-            <ul className="rule-list">
-              <li>One booking reserves one section.</li>
-              <li>Each booking runs for {settings.durationHours} hours.</li>
-              <li>Each phone can hold {settings.maxActiveBookingsPerPhone} active bookings.</li>
-              <li>Bookings open {settings.bookingWindowDays} days ahead.</li>
-              <li>Choose from the sports configured by the turf owner.</li>
-            </ul>
-          </div>
-        </aside>
-
+      <section className="workspace student-workspace" id="schedule">
         <section className="board-panel">
           <div className="section-heading">
             <div>
-              <p>Live Schedule</p>
-              <h2>Pick a free section and time</h2>
+              <p>Choose a slot</p>
+              <h2>Available slots · {formatDate(activeDate)}</h2>
             </div>
-            <label className="schedule-sport">Sport
-              <select value={selectedSport} onChange={(event) => setSelectedSport(event.target.value)}>
-                {settings.sports.map((sport) => <option key={sport}>{sport}</option>)}
-              </select>
-            </label>
             <span>{isBlockedDate(settings, activeDate) ? 'Maintenance blocked' : `${formatHour(settings.openHour)} to ${formatHour(settings.closeHour)}`}</span>
           </div>
 
@@ -742,14 +651,12 @@ function App() {
                       title={booking ? 'Unavailable' : `Book ${section}`}
                     >
                       {booking ? (
-                        <>
-                          <strong>Unavailable</strong>
-                        </>
+                        <strong>Unavailable</strong>
                       ) : (
                         <>
-                          <Plus size={18} />
                           <strong>Available</strong>
                           <small>{currency(settings.price)}</small>
+                          <span className="slot-book-label">Book</span>
                         </>
                       )}
                     </button>
@@ -767,9 +674,9 @@ function App() {
         <div className="section-heading">
           <div>
             <p>{isOwner ? 'Turf operations' : 'My bookings'}</p>
-            <h2>{isOwner ? 'Manage all reservations' : 'Your reservations'}</h2>
+            <h2>{isOwner ? 'Manage all reservations' : 'My Bookings'}</h2>
           </div>
-          <div className="filter-strip">
+          {isOwner && <div className="filter-strip">
             <Filter size={18} />
             <select value={sportFilter} onChange={(event) => setSportFilter(event.target.value)}>
               <option>All</option>
@@ -777,8 +684,8 @@ function App() {
                 <option key={sport}>{sport}</option>
               ))}
             </select>
-          </div>
-          <div className="search-box">
+          </div>}
+          {isOwner && <div className="search-box">
             <Search size={18} />
             <input
               type="search"
@@ -786,38 +693,38 @@ function App() {
               value={search}
               onChange={(event) => setSearch(event.target.value)}
             />
-          </div>
+          </div>}
         </div>
 
         <div className="booking-list">
           {filteredBookings.length === 0 ? (
             <div className="empty-state">
               <Dumbbell size={26} />
-              <p>No bookings yet.</p>
+              <p>{isOwner ? 'No bookings yet.' : 'No bookings yet. Choose a date and book your first slot.'}</p>
             </div>
           ) : (
             filteredBookings.map((booking) => (
               <article className="booking-row" key={booking.id}>
                 <div className="booking-icon">
-                  <Users size={20} />
+                  {isOwner ? <Users size={20} /> : <CalendarDays size={20} />}
                 </div>
                 <div>
-                  <h3>{booking.playerName}</h3>
+                  <h3>{isOwner ? booking.playerName : booking.section}</h3>
                   <p>
-                    {formatDate(booking.date)} · {booking.section} · {formatHour(booking.startHour)}-{formatHour(booking.endHour)}
+                    {formatDate(booking.date)} · {formatHour(booking.startHour)}-{formatHour(booking.endHour)}
                   </p>
                 </div>
                 <div className="booking-tags">
                   <span>{booking.sport}</span>
-                  <span>{booking.teamSize} players</span>
-                  <span>{booking.paymentMode || 'Pending'}</span>
-                  <span>{booking.paymentStatus || 'unpaid'}</span>
-                  {booking.cancelledAt && <span>Cancelled</span>}
+                  {isOwner && <span>{booking.teamSize} players</span>}
+                  {isOwner && <span>{booking.paymentMode || 'Pending'}</span>}
+                  {isOwner && <span>{booking.paymentStatus || 'unpaid'}</span>}
+                  {booking.cancelledAt && <span className="booking-status-cancelled">Cancelled</span>}
                   <span>{currency(booking.price)}</span>
                 </div>
-                <button className="icon-button" type="button" onClick={() => setReceiptBooking(booking)} title="View receipt">
-                  <Eye size={18} />
-                </button>
+                {isOwner
+                  ? <button className="icon-button" type="button" onClick={() => { setBookingConfirmed(false); setReceiptBooking(booking); }} title="View receipt"><Eye size={18} /></button>
+                  : <button className="ghost-button booking-detail-button" type="button" onClick={() => { setBookingConfirmed(false); setReceiptBooking(booking); }} title="View booking confirmation"><span>Details</span></button>}
                 {(!booking.cancelledAt && (isOwner || ((booking.bookedBy === currentUser.id || (!booking.bookedBy && booking.phone === currentUser.phone)) && new Date(`${booking.date}T${String(booking.startHour).padStart(2, '0')}:00:00`) > new Date()))) &&
                   <button className="danger-button" type="button" onClick={() => cancelBooking(booking.id)} title="Cancel booking"><Trash2 size={18} /></button>}
               </article>
@@ -853,7 +760,9 @@ function App() {
       {receiptBooking && (
         <ReceiptModal
           booking={receiptBooking}
-          onClose={() => setReceiptBooking(null)}
+          confirmed={bookingConfirmed}
+          student={!isOwner}
+          onClose={() => { setReceiptBooking(null); setBookingConfirmed(false); }}
         />
       )}
       {showProfile && <ProfileModal user={currentUser} onClose={() => setShowProfile(false)} onSave={saveProfile} />}
@@ -1193,21 +1102,21 @@ function BookingModal({ settings, selectedSlot, activeDate, selectedSport, curre
 
   return (
     <div className="modal-backdrop">
-      <form className="modal" onSubmit={handleSubmit}>
+      <form className="modal student-booking-modal" onSubmit={handleSubmit}>
         <div className="modal-header">
           <div>
-            <p>New Booking</p>
-            <h2>{selectedSlot.section}</h2>
+            <p>Confirm your booking</p>
+            <h2>{selectedSport} · {selectedSlot.section}</h2>
           </div>
           <button className="icon-button" type="button" onClick={onClose} title="Close">
             <X size={20} />
           </button>
         </div>
 
-        <div className="slot-summary">
-          <span>{formatDate(activeDate)}</span>
-          <span>{formatHour(selectedSlot.hour)}-{formatHour(selectedSlot.hour + settings.durationHours)}</span>
-          <span>{currency(settings.price)}</span>
+        <div className="slot-summary student-slot-summary">
+          <span><small>Date</small>{formatDate(activeDate)}</span>
+          <span><small>Time</small>{formatHour(selectedSlot.hour)}-{formatHour(selectedSlot.hour + settings.durationHours)}</span>
+          <span><small>Final price</small><strong>{currency(settings.price)}</strong></span>
         </div>
 
         <label>
@@ -1220,30 +1129,10 @@ function BookingModal({ settings, selectedSlot, activeDate, selectedSport, curre
           <input name="phone" type="tel" placeholder="9876543210" defaultValue={currentUser.phone} />
         </label>
 
-        <label>
-          College ID
-          <input name="collegeId" type="text" placeholder="Optional roll number or ID" defaultValue={currentUser.collegeId} />
-        </label>
-
-        <div className="form-grid">
-          <label>
-            Sport
-            <select name="sport" defaultValue={selectedSport}>
-              {settings.sports.map((sport) => (
-                <option key={sport}>{sport}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Players
-            <input name="teamSize" type="number" min="1" max="30" defaultValue="10" />
-          </label>
-        </div>
-
-        <label>
-          Notes
-          <textarea name="notes" rows="3" placeholder="Optional notes" />
-        </label>
+        <input type="hidden" name="collegeId" value={currentUser.collegeId || ''} />
+        <input type="hidden" name="sport" value={selectedSport} />
+        <input type="hidden" name="teamSize" value="10" />
+        <input type="hidden" name="notes" value="" />
 
         {error && <p className="form-error">{error}</p>}
 
@@ -1375,7 +1264,7 @@ function SettingsModal({ settings, onClose, onSave }) {
   );
 }
 
-function ReceiptModal({ booking, onClose }) {
+function ReceiptModal({ booking, confirmed = false, student = false, onClose }) {
   function printReceipt() {
     window.print();
   }
@@ -1385,21 +1274,22 @@ function ReceiptModal({ booking, onClose }) {
       <section className="modal receipt-modal">
         <div className="modal-header no-print">
           <div>
-            <p>Booking Receipt</p>
-            <h2>{booking.id}</h2>
+            <p>{confirmed ? 'Booking confirmed' : student ? 'Booking details' : 'Booking receipt'}</p>
+            <h2>{confirmed ? 'You’re all set!' : booking.id}</h2>
           </div>
           <button className="icon-button" type="button" onClick={onClose} title="Close">
             <X size={20} />
           </button>
         </div>
+        {confirmed && <p className="confirmation-note">Your slot is reserved. You can find it anytime in My Bookings.</p>}
         <div className="receipt-card">
           <div className="receipt-top">
             <div className="brand-mark">
               <ClipboardCheck size={24} />
             </div>
             <div>
-              <p>TurfCast · College Sports Desk</p>
-              <h3>{booking.playerName}</h3>
+              <p>{student ? 'TurfCast · College Turf' : 'TurfCast · College Sports Desk'}</p>
+              <h3>{student ? booking.sport : booking.playerName}</h3>
             </div>
           </div>
           <div className="receipt-grid">
@@ -1407,10 +1297,10 @@ function ReceiptModal({ booking, onClose }) {
             <ReceiptItem label="Time" value={`${formatHour(booking.startHour)}-${formatHour(booking.endHour)}`} />
             <ReceiptItem label="Section" value={booking.section} />
             <ReceiptItem label="Sport" value={booking.sport} />
-            <ReceiptItem label="Phone" value={booking.phone} />
-            <ReceiptItem label="College ID" value={booking.collegeId || 'Not added'} />
-            <ReceiptItem label="Players" value={booking.teamSize} />
-            <ReceiptItem label="Payment" value={booking.paymentMode || 'Pending'} />
+            {!student && <ReceiptItem label="Phone" value={booking.phone} />}
+            {!student && <ReceiptItem label="College ID" value={booking.collegeId || 'Not added'} />}
+            {!student && <ReceiptItem label="Players" value={booking.teamSize} />}
+            {!student && <ReceiptItem label="Payment" value={booking.paymentMode || 'Pending'} />}
           </div>
           <div className="receipt-total">
             <span>Total</span>

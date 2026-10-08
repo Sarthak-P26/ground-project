@@ -1985,3 +1985,318 @@ textarea:focus {
     transform: scale(1) translateY(0);
   }
 }
+
+.student-experience .simple-welcome {
+  min-height: 112px;
+  margin-bottom: 18px;
+  padding: 20px 24px;
+}
+
+.student-experience .simple-welcome p {
+  color: #a8e8c0;
+}
+
+.student-experience .simple-welcome h2 {
+  margin: 0;
+  font-size: clamp(1.55rem, 3vw, 2.15rem);
+}
+
+.student-sport-row {
+  display: flex;
+  align-items: end;
+  margin: 0 0 12px;
+}
+
+.student-sport-row label {
+  width: min(280px, 100%);
+  gap: 5px;
+}
+
+.student-sport-row label::before {
+  content: "1 · SPORT";
+  color: #607066;
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+}
+
+.student-dates {
+  display: flex;
+  align-items: stretch;
+  gap: 9px;
+  margin-bottom: 14px;
+  padding: 2px 2px 8px;
+  overflow-x: auto;
+}
+
+.student-dates .date-pill {
+  flex: 0 0 82px;
+  min-width: 82px;
+  min-height: 84px;
+  border-radius: 16px;
+  padding: 10px 12px;
+}
+
+.student-dates .date-pill strong {
+  margin: 2px 0;
+  font-size: 1.65rem;
+  line-height: 1.1;
+}
+
+.student-dates .date-pill span,
+.student-dates .date-pill small {
+  font-size: 0.72rem;
+}
+
+.date-picker {
+  flex: 0 0 220px;
+  align-content: center;
+  gap: 5px;
+  padding: 0 4px 0 8px;
+}
+
+.date-picker span {
+  color: #607066;
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.date-picker input {
+  min-height: 42px;
+  background: #fff;
+}
+
+.student-workspace {
+  display: block;
+  margin-bottom: 18px;
+}
+
+.student-experience .board-panel {
+  padding: clamp(16px, 2.2vw, 26px);
+}
+
+.student-experience .section-heading {
+  align-items: center;
+  margin-bottom: 18px;
+}
+
+.student-experience .section-heading > div p {
+  color: #0f7b57;
+}
+
+.student-experience .section-heading h2 {
+  font-size: clamp(1.2rem, 2.4vw, 1.6rem);
+}
+
+.student-experience .slot-card {
+  min-height: 102px;
+  justify-items: center;
+  align-content: center;
+  gap: 4px;
+  border-radius: 0;
+  text-align: center;
+}
+
+.student-experience .slot-card.available strong {
+  color: #234334;
+  font-size: 0.9rem;
+}
+
+.student-experience .slot-card.available small {
+  color: #46564c;
+  font-size: 0.86rem;
+  font-weight: 750;
+}
+
+.student-experience .slot-book-label {
+  color: #0f7b57;
+  font-size: 0.75rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.student-experience .slot-card.available:hover .slot-book-label {
+  color: #084c35;
+}
+
+.student-experience .slot-card.booked {
+  justify-items: center;
+  color: #718078;
+  background: #f2f5f3;
+  background-image: none;
+}
+
+.student-experience .records-panel {
+  margin-top: 0;
+  padding: clamp(16px, 2.2vw, 26px);
+}
+
+.student-experience #records .section-heading {
+  align-items: center;
+}
+
+.student-experience .booking-row {
+  min-width: 0;
+  gap: 12px;
+  border-radius: 16px;
+  padding: 14px;
+}
+
+.student-experience .booking-row > div:nth-child(2) {
+  min-width: 150px;
+}
+
+.student-experience .booking-icon {
+  border-radius: 13px;
+  background: #e8f4ed;
+  color: #0f7b57;
+}
+
+.student-experience .booking-tags {
+  margin-left: auto;
+}
+
+.student-experience .booking-tags span {
+  background: #f1f5f2;
+  font-size: 0.78rem;
+}
+
+.student-experience .booking-tags .booking-status-cancelled {
+  background: #fff0f0;
+  color: #a33131;
+}
+
+.student-experience .booking-detail-button {
+  width: auto;
+  min-height: 38px;
+  border-color: transparent;
+  color: #0f7b57;
+  padding: 0 12px;
+}
+
+.student-experience .booking-detail-button:hover {
+  background: #e8f4ed;
+}
+
+.student-booking-modal {
+  gap: 12px;
+  border-radius: 22px;
+  padding: clamp(20px, 4vw, 30px);
+}
+
+.student-booking-modal > label {
+  gap: 5px;
+}
+
+.student-booking-modal .modal-actions {
+  margin-top: 2px;
+}
+
+.student-booking-modal .modal-header h2 {
+  font-size: clamp(1.35rem, 4vw, 1.8rem);
+}
+
+.student-slot-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  border: 1px solid #dce9df;
+  border-radius: 16px;
+  background: #f3f8f4;
+  padding: 14px;
+}
+
+.student-slot-summary span {
+  display: grid;
+  gap: 5px;
+  font-size: 0.9rem;
+}
+
+.student-slot-summary small {
+  color: #607066;
+  font-size: 0.7rem;
+  font-weight: 900;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.student-slot-summary span:last-child strong {
+  color: #0f7b57;
+  font-size: 1.2rem;
+}
+
+.confirmation-note {
+  margin: 0;
+  border: 1px solid #cce8d6;
+  border-radius: 12px;
+  background: #edf8f0;
+  color: #17623e;
+  padding: 12px 14px;
+  font-weight: 750;
+}
+
+@media (max-width: 720px) {
+  .student-experience .simple-welcome {
+    align-items: center;
+    flex-direction: row;
+    min-height: 88px;
+    padding: 16px;
+  }
+
+  .student-experience .simple-welcome .primary-button {
+    width: auto;
+    flex: 0 0 auto;
+  }
+
+  .student-sport-row {
+    margin-bottom: 10px;
+  }
+
+  .student-dates {
+    margin-right: -14px;
+    margin-left: -14px;
+    padding: 2px 14px 8px;
+  }
+
+  .date-picker {
+    flex-basis: 190px;
+  }
+
+  .student-experience .section-heading {
+    align-items: flex-start;
+  }
+
+  .student-experience .section-heading > span {
+    align-self: flex-end;
+    font-size: 0.78rem;
+  }
+
+  .student-experience .booking-row {
+    display: grid;
+    grid-template-columns: 42px minmax(0, 1fr) auto;
+  }
+
+  .student-experience .booking-row > div:nth-child(2) {
+    min-width: 0;
+  }
+
+  .student-experience .booking-tags {
+    grid-column: 2 / -1;
+    margin-left: 0;
+  }
+
+  .student-experience .booking-row > .danger-button {
+    grid-column: 3;
+    grid-row: 1;
+  }
+
+  .student-slot-summary {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .student-slot-summary span:last-child {
+    grid-column: 1 / -1;
+  }
+}
