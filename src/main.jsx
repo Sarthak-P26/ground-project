@@ -130,6 +130,21 @@ function bookingMatchesSlot(booking, date, section, hour) {
   return booking.date === date && booking.section === section && Number(booking.startHour) === Number(hour);
 }
 
+function activeSlotPrice(priceOverrides, date, section, hour) {
+  return priceOverrides.find((override) =>
+    override.active &&
+    override.date === date &&
+    override.section === section &&
+    Number(override.startHour) === Number(hour),
+  );
+}
+
+function isFutureBookingSlot(date, hour) {
+  const [year, month, day] = String(date).split('-').map(Number);
+  const startTimestamp = Date.UTC(year, month - 1, day, Number(hour)) - 330 * 60 * 1000;
+  return Number.isFinite(startTimestamp) && startTimestamp > Date.now();
+}
+
 function isBlockedDate(settings, date) {
   return settings.maintenanceDates?.includes(date);
 }
@@ -153,6 +168,7 @@ function datePlus(days) {
 function App() {
   const [settings, setSettings] = useState(() => loadJson(STORAGE_KEYS.settings, DEFAULT_SETTINGS));
   const [bookings, setBookings] = useState(() => loadJson(STORAGE_KEYS.bookings, []));
+  const [priceOverrides, setPriceOverrides] = useState([]);
   const [currentUser, setCurrentUser] = useState(null);
   const [sessionLoading, setSessionLoading] = useState(() => Boolean(loadJson(STORAGE_KEYS.token, '')));
   const [authRole, setAuthRole] = useState('student');
@@ -273,6 +289,7 @@ function App() {
         const mergedSettings = { ...DEFAULT_SETTINGS, ...store.settings };
         setSettings(mergedSettings);
         setBookings(store.bookings);
+        setPriceOverrides(store.priceOverrides || []);
         saveJson(STORAGE_KEYS.settings, mergedSettings);
         saveJson(STORAGE_KEYS.bookings, store.bookings);
         setSyncStatus('Live');
@@ -313,7 +330,6 @@ function App() {
       paymentMode: 'Pay at venue',
       paymentStatus: 'unpaid',
       notes: String(get('notes') || '').trim(),
-      price: Number(settings.price),
       createdAt: new Date().toISOString(),
     };
 
@@ -352,6 +368,7 @@ function App() {
       const store = await response.json();
       persistBookings(store.bookings);
       persistSettings(store.settings);
+      setPriceOverrides(store.priceOverrides || []);
       const savedBooking = store.bookings.find((booking) =>
         booking.bookedBy === currentUser.id &&
         booking.date === activeDate &&
@@ -428,6 +445,7 @@ function App() {
       if (!response.ok) throw new Error(store.message || 'Could not save settings.');
       persistSettings(store.settings);
       persistBookings(store.bookings);
+      setPriceOverrides(store.priceOverrides || []);
       setSyncStatus('Live');
       setAppMessage('');
       return true;
@@ -436,6 +454,46 @@ function App() {
       setAppMessage(error.message || 'Settings could not be saved. Check your connection and try again.');
       return false;
     }
+  }
+
+  async function savePriceOverride(priceOverride) {
+    const response = await fetch('/api/pricing/overrides', {
+      method: 'PUT',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(priceOverride),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.message || 'Could not save this slot price.');
+    setPriceOverrides(result.priceOverrides || []);
+    setSyncStatus('Live');
+    return true;
+  }
+
+  async function saveDefaultPrice(price) {
+    const response = await fetch('/api/pricing/default', {
+      method: 'PUT',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ price }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.message || 'Could not save the default price.');
+    persistSettings(result.settings);
+    persistBookings(result.bookings);
+    setPriceOverrides(result.priceOverrides || []);
+    setSyncStatus('Live');
+    return true;
+  }
+
+  async function deactivatePriceOverride(id) {
+    const response = await fetch(`/api/pricing/overrides/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: authHeaders(),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.message || 'Could not reset this slot price.');
+    setPriceOverrides(result.priceOverrides || []);
+    setSyncStatus('Live');
+    return true;
   }
 
   async function markBookingPaid(id) {
@@ -461,6 +519,7 @@ function App() {
     setCurrentUser(user);
     setSettings(mergedSettings);
     setBookings(store?.bookings || bookings);
+    setPriceOverrides(store?.priceOverrides || []);
     saveJson(STORAGE_KEYS.user, user);
     saveJson(STORAGE_KEYS.token, sessionToken);
     saveJson(STORAGE_KEYS.settings, mergedSettings);
@@ -695,6 +754,11 @@ function App() {
           onSearchChange={setSearch}
           onSportFilterChange={setSportFilter}
           onOpenSettings={() => setShowSettings(true)}
+          priceOverrides={priceOverrides}
+          slots={slots}
+          onSaveDefaultPrice={saveDefaultPrice}
+          onSavePriceOverride={savePriceOverride}
+          onDeactivatePriceOverride={deactivatePriceOverride}
           onOpenProfile={() => setShowProfile(true)}
           onMarkPaid={markBookingPaid}
           onCancelBooking={cancelBooking}
@@ -768,12 +832,14 @@ function App() {
                 </div>
                 {settings.sections.map((section) => {
                   const booking = activeBookings.find((item) => bookingMatchesSlot(item, activeDate, section, hour));
+                  const override = activeSlotPrice(priceOverrides, activeDate, section, hour);
+                  const slotPrice = override?.price ?? settings.price;
                   return (
                     <button
                       type="button"
-                      className={`slot-card ${booking ? 'booked' : 'available'}`}
+                      className={`slot-card ${booking ? 'booked' : 'available'} ${!booking && override?.type === 'promotion' ? 'special-price-card' : ''}`}
                       key={`${section}-${hour}`}
-                      onClick={() => !booking && setSelectedSlot({ section, hour })}
+                      onClick={() => !booking && setSelectedSlot({ section, hour, price: slotPrice })}
                       disabled={Boolean(booking)}
                       title={booking ? 'Unavailable' : `Book ${section}`}
                     >
@@ -781,8 +847,8 @@ function App() {
                         <strong>Unavailable</strong>
                       ) : (
                         <>
-                          <strong>Available</strong>
-                          <small>{currency(settings.price)}</small>
+                          <strong>{override?.type === 'promotion' ? 'Special Price' : 'Available'}</strong>
+                          <small>{currency(slotPrice)}</small>
                           <span className="slot-book-label">Book</span>
                         </>
                       )}
@@ -1191,6 +1257,11 @@ function OwnerExperience({
   onSearchChange,
   onSportFilterChange,
   onOpenSettings,
+  priceOverrides,
+  slots,
+  onSaveDefaultPrice,
+  onSavePriceOverride,
+  onDeactivatePriceOverride,
   onOpenProfile,
   onMarkPaid,
   onCancelBooking,
@@ -1246,7 +1317,15 @@ function OwnerExperience({
           onViewBooking={onViewBooking}
         />
       )}
-      {page === 'pricing' && <OwnerPricing settings={settings} onManageSettings={onOpenSettings} />}
+      {page === 'pricing' && <OwnerPricing
+        settings={settings}
+        priceOverrides={priceOverrides}
+        slots={slots}
+        onManageSettings={onOpenSettings}
+        onSaveDefaultPrice={onSaveDefaultPrice}
+        onSavePriceOverride={onSavePriceOverride}
+        onDeactivatePriceOverride={onDeactivatePriceOverride}
+      />}
       {page === 'analytics' && <OwnerAnalytics bookings={activeBookings} settings={settings} />}
       {page === 'settings' && <OwnerTurfSettings settings={settings} onEdit={onOpenSettings} />}
       {page === 'profile' && <OwnerProfile user={user} onEdit={onOpenProfile} />}
@@ -1460,20 +1539,230 @@ function OwnerBookings({ bookings, sports, search, sportFilter, onSearchChange, 
   );
 }
 
-function OwnerPricing({ settings, onManageSettings }) {
+function OwnerPricing({
+  settings,
+  priceOverrides,
+  slots,
+  onManageSettings,
+  onSaveDefaultPrice,
+  onSavePriceOverride,
+  onDeactivatePriceOverride,
+}) {
+  const today = toDateInput(new Date());
+  const latestDate = datePlus(Number(settings.bookingWindowDays));
+  const [defaultPrice, setDefaultPrice] = useState(String(settings.price));
+  const [slotDate, setSlotDate] = useState(() => datePlus(1));
+  const [section, setSection] = useState(settings.sections[0] || '');
+  const [startHour, setStartHour] = useState(slots[0] ?? '');
+  const [slotPrice, setSlotPrice] = useState(String(settings.price));
+  const [priceType, setPriceType] = useState('manual');
+  const [savingDefault, setSavingDefault] = useState(false);
+  const [savingSlot, setSavingSlot] = useState(false);
+  const [defaultError, setDefaultError] = useState('');
+  const [slotError, setSlotError] = useState('');
+  const [notice, setNotice] = useState('');
+
+  const selectedOverride = activeSlotPrice(priceOverrides, slotDate, section, Number(startHour));
+  const upcomingOverrides = priceOverrides
+    .filter((override) => override.active && override.date >= today && override.date <= latestDate)
+    .sort((a, b) => `${a.date}-${a.startHour}-${a.section}`.localeCompare(`${b.date}-${b.startHour}-${b.section}`));
+  const dateSlots = slots.filter((hour) => isFutureBookingSlot(slotDate, hour));
+
+  useEffect(() => {
+    setDefaultPrice(String(settings.price));
+  }, [settings.price]);
+
+  useEffect(() => {
+    setSlotPrice(String(selectedOverride?.price ?? settings.price));
+    setPriceType(selectedOverride?.type ?? 'manual');
+  }, [selectedOverride?.id, selectedOverride?.price, selectedOverride?.type, settings.price]);
+
+  async function saveDefault(event) {
+    event.preventDefault();
+    const price = Number(defaultPrice);
+    if (!Number.isSafeInteger(price) || price < 1 || price > 100000) {
+      setDefaultError('Enter a whole-number price from ₹1 to ₹100,000.');
+      return;
+    }
+    setSavingDefault(true);
+    setDefaultError('');
+    setNotice('');
+    try {
+      await onSaveDefaultPrice(price);
+      setNotice('Default price saved.');
+    } catch (error) {
+      setDefaultError(error.message || 'Default price could not be saved.');
+    } finally {
+      setSavingDefault(false);
+    }
+  }
+
+  async function saveSlotPrice(event) {
+    event.preventDefault();
+    const price = Number(slotPrice);
+    if (!Number.isSafeInteger(price) || price < 1 || price > 100000) {
+      setSlotError('Enter a whole-number price from ₹1 to ₹100,000.');
+      return;
+    }
+    if (!dateSlots.includes(Number(startHour))) {
+      setSlotError('Choose a future time slot.');
+      return;
+    }
+    setSavingSlot(true);
+    setSlotError('');
+    setNotice('');
+    try {
+      await onSavePriceOverride({
+        date: slotDate,
+        section,
+        startHour: Number(startHour),
+        price,
+        type: priceType,
+      });
+      setNotice(`${priceType === 'promotion' ? 'Special price' : 'Manual price'} saved for ${section}.`);
+    } catch (error) {
+      setSlotError(error.message || 'Slot price could not be saved.');
+    } finally {
+      setSavingSlot(false);
+    }
+  }
+
+  async function resetSelectedOverride() {
+    if (!selectedOverride) return;
+    setSavingSlot(true);
+    setSlotError('');
+    setNotice('');
+    try {
+      await onDeactivatePriceOverride(selectedOverride.id);
+      setNotice('Slot reset to the default price.');
+    } catch (error) {
+      setSlotError(error.message || 'Slot price could not be reset.');
+    } finally {
+      setSavingSlot(false);
+    }
+  }
+
+  function editOverride(override) {
+    setSlotDate(override.date);
+    setSection(override.section);
+    setStartHour(override.startHour);
+    setSlotPrice(String(override.price));
+    setPriceType(override.type);
+    setSlotError('');
+    setNotice('');
+  }
+
   return (
-    <section className="owner-panel owner-settings-page">
-      <div>
-        <p className="owner-kicker">Current default price</p>
-        <h3>{currency(settings.price)} <span>/ slot</span></h3>
-        <p>Applies to a {settings.durationHours}-hour booking. Existing bookings retain their recorded price.</p>
-        <dl className="owner-settings-list owner-pricing-details">
-          <div><dt>Slot duration</dt><dd>{settings.durationHours} hours</dd></div>
-          <div><dt>Pricing status</dt><dd>Owner-managed fixed price</dd></div>
-        </dl>
-      </div>
-      <button className="primary-button" type="button" onClick={onManageSettings}><IndianRupee size={17} />Manage price</button>
-    </section>
+    <div className="owner-pricing-page">
+      <section className="owner-panel owner-pricing-default">
+        <div>
+          <p className="owner-kicker">Default Price</p>
+          <h3>{currency(settings.price)} <span>/ {settings.durationHours} hours</span></h3>
+          <p>Used for every slot unless a manual or special price is active.</p>
+        </div>
+        <form className="owner-default-price-form" onSubmit={saveDefault}>
+          <label>
+            Change default price
+            <span><span aria-hidden="true">₹</span><input aria-label="Default price in INR" type="number" min="1" max="100000" step="1" value={defaultPrice} onChange={(event) => setDefaultPrice(event.target.value)} required /></span>
+          </label>
+          <button className="primary-button" type="submit" disabled={savingDefault}>{savingDefault ? 'Saving' : 'Save default'}</button>
+        </form>
+        {defaultError && <p className="form-error" role="alert">{defaultError}</p>}
+      </section>
+
+      <section className="owner-panel owner-slot-pricing">
+        <div className="owner-panel-heading">
+          <div><h3>Manage slot prices</h3><p>Set a one-time price for a specific upcoming date, section, and time.</p></div>
+        </div>
+        <form className="owner-slot-price-form" onSubmit={saveSlotPrice}>
+          <label>
+            Date
+            <input type="date" min={today} max={latestDate} value={slotDate} onChange={(event) => {
+              const nextDate = event.target.value;
+              setSlotDate(nextDate);
+              const nextSlots = slots.filter((hour) => isFutureBookingSlot(nextDate, hour));
+              if (nextSlots.length) setStartHour(nextSlots[0]);
+            }} required />
+          </label>
+          <label>
+            Section
+            <select value={section} onChange={(event) => setSection(event.target.value)} required>
+              {settings.sections.map((item) => <option key={item} value={item}>{item}</option>)}
+            </select>
+          </label>
+          <label>
+            Time slot
+            <select value={startHour} onChange={(event) => setStartHour(Number(event.target.value))} required>
+              {slots.map((hour) => <option key={hour} value={hour} disabled={!isFutureBookingSlot(slotDate, hour)}>
+                {formatHour(hour)}–{formatHour(hour + settings.durationHours)}{!isFutureBookingSlot(slotDate, hour) ? ' · Started' : ''}
+              </option>)}
+            </select>
+          </label>
+          <label>
+            Price type
+            <select value={priceType} onChange={(event) => setPriceType(event.target.value)}>
+              <option value="manual">Manual price</option>
+              <option value="promotion">Special Price</option>
+            </select>
+          </label>
+          <label>
+            {priceType === 'promotion' ? 'Promotional price' : 'Set price'} (INR)
+            <span className="owner-rupee-input"><span aria-hidden="true">₹</span><input type="number" min="1" max="100000" step="1" value={slotPrice} onChange={(event) => setSlotPrice(event.target.value)} required /></span>
+          </label>
+          <div className="owner-slot-price-actions">
+            <button className="primary-button" type="submit" disabled={savingSlot || !dateSlots.includes(Number(startHour))}>
+              {savingSlot ? 'Saving' : 'Save Price'}
+            </button>
+            {selectedOverride && <button className="ghost-button" type="button" onClick={resetSelectedOverride} disabled={savingSlot}>Reset to default</button>}
+          </div>
+        </form>
+        <div className="owner-current-slot-price" aria-live="polite">
+          <span>{formatDate(slotDate)} · {section} · {formatHour(Number(startHour))}–{formatHour(Number(startHour) + settings.durationHours)}</span>
+          <strong>Current: {currency(selectedOverride?.price ?? settings.price)}</strong>
+          <small>Price type: {selectedOverride?.type === 'promotion' ? 'Special Price' : selectedOverride ? 'Manual' : 'Default'}</small>
+        </div>
+        {slotError && <p className="form-error" role="alert">{slotError}</p>}
+      </section>
+
+      <section className="owner-panel owner-upcoming-prices">
+        <div className="owner-panel-heading">
+          <div><h3>Upcoming slot prices</h3><p>Active custom prices; all other slots use the default.</p></div>
+          <span>{upcomingOverrides.length}</span>
+        </div>
+        {upcomingOverrides.length ? <div className="owner-price-list">
+          {upcomingOverrides.map((override) => (
+            <article className="owner-price-row" key={override.id}>
+              <div>
+                <strong>{formatDate(override.date)} · {override.section}</strong>
+                <span>{formatHour(override.startHour)}–{formatHour(override.startHour + settings.durationHours)} · {override.type === 'promotion' ? 'Special Price' : 'Manual'}</span>
+              </div>
+              <strong>{currency(override.price)}</strong>
+              <div>
+                <button className="owner-action-button" type="button" onClick={() => editOverride(override)}>Edit</button>
+                <button className="owner-action-button danger" type="button" onClick={() => {
+                  editOverride(override);
+                  void (async () => {
+                    setSavingSlot(true);
+                    setSlotError('');
+                    setNotice('');
+                    try {
+                      await onDeactivatePriceOverride(override.id);
+                      setNotice('Slot reset to the default price.');
+                    } catch (error) {
+                      setSlotError(error.message || 'Slot price could not be deactivated.');
+                    } finally {
+                      setSavingSlot(false);
+                    }
+                  })();
+                }} disabled={savingSlot}>{override.type === 'promotion' ? 'Deactivate' : 'Reset'}</button>
+              </div>
+            </article>
+          ))}
+        </div> : <p className="owner-empty-note">No custom slot prices are active in the booking window.</p>}
+      </section>
+      {notice && <p className="owner-pricing-notice" role="status">{notice}</p>}
+      <button className="ghost-button owner-pricing-settings-link" type="button" onClick={onManageSettings}><Settings size={17} />Turf settings</button>
+    </div>
   );
 }
 
@@ -1647,7 +1936,7 @@ function BookingModal({ settings, selectedSlot, activeDate, selectedSport, curre
         <div className="slot-summary student-slot-summary">
           <span><small>Date</small>{formatDate(activeDate)}</span>
           <span><small>Time</small>{formatHour(selectedSlot.hour)}-{formatHour(selectedSlot.hour + settings.durationHours)}</span>
-          <span><small>Final price</small><strong>{currency(settings.price)}</strong></span>
+          <span><small>Final price</small><strong>{currency(selectedSlot.price ?? settings.price)}</strong></span>
         </div>
 
         <label>

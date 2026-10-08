@@ -9,7 +9,7 @@ import nodemailer from 'nodemailer';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express(); const PORT = process.env.PORT || 4173;
-const defaults = { settings: { price: 600, durationHours: 3, openHour: 6, closeHour: 21, sections: ['Section A', 'Section B', 'Section C', 'Section D'], sports: ['Cricket', 'Football'], bookingWindowDays: 14, maxActiveBookingsPerPhone: 2, maintenanceDates: [] }, bookings: [], users: [] };
+const defaults = { settings: { price: 600, durationHours: 3, openHour: 6, closeHour: 21, sections: ['Section A', 'Section B', 'Section C', 'Section D'], sports: ['Cricket', 'Football'], bookingWindowDays: 14, maxActiveBookingsPerPhone: 2, maintenanceDates: [] }, priceOverrides: [], bookings: [], users: [] };
 const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');
 const databaseUrl = process.env.FIREBASE_DATABASE_URL;
 const hasServiceAccount = Boolean(databaseUrl && process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && privateKey);
@@ -35,6 +35,46 @@ const mailTransport = smtpUser && smtpAppPassword
   : null;
 app.use(express.json());
 const list = (v) => Array.isArray(v) ? v : Object.values(v || {});
+const MAX_PRICE_INR = 100000;
+const isValidPrice = (value) => typeof value === 'number' && Number.isSafeInteger(value) && value > 0 && value <= MAX_PRICE_INR;
+function normalizePriceOverrides(overrides, settings) {
+  const activeOverrides = new Map();
+  const normalized = list(overrides || []).flatMap((override) => {
+    const date = String(override?.date || '');
+    const section = String(override?.section || '');
+    const startHour = Number(override?.startHour);
+    if (
+      !override ||
+      typeof override.id !== 'string' ||
+      !isValidDateValue(date) ||
+      !settings.sections.includes(section) ||
+      !Number.isSafeInteger(startHour) ||
+      !slots(settings).includes(startHour) ||
+      !isValidPrice(override.price) ||
+      !['manual', 'promotion'].includes(override.type) ||
+      typeof override.active !== 'boolean'
+    ) return [];
+    return [{
+      id: override.id,
+      date,
+      section,
+      startHour,
+      price: override.price,
+      type: override.type,
+      active: override.active,
+      createdAt: String(override.createdAt || ''),
+      updatedAt: String(override.updatedAt || ''),
+    }];
+  });
+  for (const override of normalized) {
+    if (!override.active) continue;
+    const key = `${override.date}|${override.section}|${override.startHour}`;
+    const previous = activeOverrides.get(key);
+    if (previous) previous.active = false;
+    activeOverrides.set(key, override);
+  }
+  return normalized;
+}
 const normalizeBooking = (booking = {}) => ({
   ...booking,
   paymentMode: booking.paymentMode === 'UPI' ? 'Pay at venue' : (booking.paymentMode || 'Pay at venue'),
@@ -55,7 +95,15 @@ const normalizeStore = (store = {}, forceRoleMigration = false) => {
   const normalizedUsers = normalizeUserRoles(store.users);
   delete storedSettings.adminPin;
   const normalized = {
-    settings: { ...defaults.settings, ...storedSettings },
+    settings: {
+      ...defaults.settings,
+      ...storedSettings,
+      price: isValidPrice(storedSettings.price) ? storedSettings.price : defaults.settings.price,
+    },
+    priceOverrides: normalizePriceOverrides(store.priceOverrides, {
+      ...defaults.settings,
+      ...storedSettings,
+    }),
     bookings: list(store.bookings || []).map(normalizeBooking),
     users: normalizedUsers.users,
   };
@@ -76,12 +124,13 @@ async function readFileStore() {
 async function readStore() {
   const fileStore = await readFileStore();
   if (!db) return fileStore;
-  const [settings, bookings, users] = await Promise.all(['settings', 'bookings', 'users'].map((node) => db.ref(node).once('value')));
+  const [settings, priceOverrides, bookings, users] = await Promise.all(['settings', 'priceOverrides', 'bookings', 'users'].map((node) => db.ref(node).once('value')));
   const mergedUsers = new Map(fileStore.users.map((user) => [user.id, user]));
   const firebaseUsers = list(users.val() || []);
   for (const user of firebaseUsers) mergedUsers.set(user.id, user);
   return normalizeStore({
     settings: settings.val() || {},
+    priceOverrides: priceOverrides.val() || [],
     bookings: bookings.val() || [],
     users: [...mergedUsers.values()],
   }, fileStore[rolesNeedMigration] || firebaseUsers.some((user) => !['student', 'owner'].includes(user.role)));
@@ -97,7 +146,7 @@ async function writeFileStore(store) {
 }
 async function writeStore(store) {
   if (!db) return writeFileStore(store);
-  await db.ref().update({ settings: store.settings, bookings: store.bookings, users: store.users });
+  await db.ref().update({ settings: store.settings, priceOverrides: store.priceOverrides, bookings: store.bookings, users: store.users });
 }
 async function writeUsers(users) {
   if (db) return db.ref('users').set(users);
@@ -177,7 +226,11 @@ const publicUser = (u) => u && ({
   ownerTitle: u.ownerTitle || '',
   createdAt: u.createdAt,
 });
-const publicStore = (s) => ({ settings: s.settings, bookings: (s.bookings || []).map(normalizeBooking) });
+const publicStore = (s) => ({
+  settings: s.settings,
+  bookings: (s.bookings || []).map(normalizeBooking),
+  priceOverrides: s.priceOverrides || [],
+});
 function configuredAppUrl() {
   const configuredUrl = String(process.env.APP_BASE_URL || '').trim();
   if (!configuredUrl) return null;
@@ -436,10 +489,14 @@ app.put('/api/settings', route(async (req, res) => {
     if (user?.role !== 'owner') return { status: 403, body: { message: 'Owner access is required to update turf settings.' } };
     const old = current.settings;
     const settingsInput = req.body;
+    const price = Object.hasOwn(settingsInput, 'price') ? settingsInput.price : old.price;
+    if (!isValidPrice(price)) {
+      return { status: 400, body: { message: `Price must be a whole-number INR amount between ₹1 and ₹${MAX_PRICE_INR}.` } };
+    }
     current.settings = {
       ...old,
       ...settingsInput,
-      price: Math.max(1, Number(settingsInput.price)),
+      price,
       durationHours: Math.max(1, Number(settingsInput.durationHours)),
       openHour: Math.max(0, Math.min(23, Number(settingsInput.openHour))),
       closeHour: Math.max(1, Math.min(24, Number(settingsInput.closeHour))),
@@ -453,6 +510,88 @@ app.put('/api/settings', route(async (req, res) => {
     return { status: 200, body: publicStore(current) };
   });
   res.status(store.status).json(store.body);
+}));
+app.put('/api/pricing/default', route(async (req, res) => {
+  const result = await withStoreLock(async () => {
+    const store = await readStore();
+    const user = authenticatedUser(store, req);
+    if (user?.role !== 'owner') return { status: 403, body: { message: 'Owner access is required to update the default price.' } };
+    if (!isValidPrice(req.body.price)) {
+      return { status: 400, body: { message: `Price must be a whole-number INR amount between ₹1 and ₹${MAX_PRICE_INR}.` } };
+    }
+    store.settings.price = req.body.price;
+    await writeStore(store);
+    return { status: 200, body: publicStoreForUser(store, user) };
+  });
+  res.status(result.status).json(result.body);
+}));
+app.put('/api/pricing/overrides', route(async (req, res) => {
+  const result = await withStoreLock(async () => {
+    const store = await readStore();
+    const user = authenticatedUser(store, req);
+    if (user?.role !== 'owner') return { status: 403, body: { message: 'Owner access is required to manage slot prices.' } };
+
+    const { date, section, startHour, price, type } = req.body;
+    if (
+      typeof date !== 'string' ||
+      !isValidDateValue(date) ||
+      typeof section !== 'string' ||
+      !store.settings.sections.includes(section) ||
+      !Number.isSafeInteger(startHour) ||
+      !slots(store.settings).includes(startHour) ||
+      bookingStartTimestamp(date, startHour) <= Date.now()
+    ) {
+      return { status: 400, body: { message: 'Choose a valid date, section, and time slot.' } };
+    }
+    if (!isValidPrice(price)) {
+      return { status: 400, body: { message: `Price must be a whole-number INR amount between ₹1 and ₹${MAX_PRICE_INR}.` } };
+    }
+    if (!['manual', 'promotion'].includes(type)) {
+      return { status: 400, body: { message: 'Choose a manual or promotional price type.' } };
+    }
+    const lastBookingDate = new Date(`${today()}T00:00:00.000Z`);
+    lastBookingDate.setUTCDate(lastBookingDate.getUTCDate() + Number(store.settings.bookingWindowDays));
+    if (date < today() || date > lastBookingDate.toISOString().slice(0, 10)) {
+      return { status: 400, body: { message: `Choose a date within the ${store.settings.bookingWindowDays}-day booking window.` } };
+    }
+    const key = (item) => item.date === date && item.section === section && item.startHour === startHour;
+    const existing = store.priceOverrides.find((item) => item.active && key(item));
+    const now = new Date().toISOString();
+    if (existing) {
+      existing.price = price;
+      existing.type = type;
+      existing.updatedAt = now;
+    } else {
+      store.priceOverrides.push({
+        id: `PRICE-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`,
+        date,
+        section,
+        startHour,
+        price,
+        type,
+        active: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+    await writeStore(store);
+    return { status: 200, body: publicStoreForUser(store, user) };
+  });
+  res.status(result.status).json(result.body);
+}));
+app.delete('/api/pricing/overrides/:id', route(async (req, res) => {
+  const result = await withStoreLock(async () => {
+    const store = await readStore();
+    const user = authenticatedUser(store, req);
+    if (user?.role !== 'owner') return { status: 403, body: { message: 'Owner access is required to manage slot prices.' } };
+    const override = store.priceOverrides.find((item) => item.id === req.params.id && item.active);
+    if (!override) return { status: 404, body: { message: 'Active slot price not found.' } };
+    override.active = false;
+    override.updatedAt = new Date().toISOString();
+    await writeStore(store);
+    return { status: 200, body: publicStoreForUser(store, user) };
+  });
+  res.status(result.status).json(result.body);
 }));
 app.post('/api/bookings', route(async (req, res) => {
   const result = await withStoreLock(async () => {
@@ -474,7 +613,7 @@ app.post('/api/bookings', route(async (req, res) => {
       bookedBy: user.id,
       paymentMode: 'Pay at venue',
       paymentStatus: 'unpaid',
-      price: Number(settings.price),
+      price: settings.price,
       startHour,
       endHour: startHour + Number(settings.durationHours),
       teamSize,
@@ -493,6 +632,13 @@ app.post('/api/bookings', route(async (req, res) => {
     if (!settings.sections.includes(booking.section) || !settings.sports.includes(booking.sport) || !slots(settings).includes(booking.startHour)) {
       return { status: 400, body: { message: 'Invalid booking details.' } };
     }
+    const slotPrice = store.priceOverrides.find((item) =>
+      item.active &&
+      item.date === booking.date &&
+      item.section === booking.section &&
+      item.startHour === booking.startHour,
+    );
+    booking.price = slotPrice?.price ?? settings.price;
     if (bookingStartTimestamp(booking.date, booking.startHour) <= Date.now()) {
       return { status: 400, body: { message: 'This time slot has already started.' } };
     }

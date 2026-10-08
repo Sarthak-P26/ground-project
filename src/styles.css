@@ -2107,6 +2107,19 @@ textarea:focus {
   color: #084c35;
 }
 
+.student-experience .slot-card.special-price-card {
+  border-color: #c7a75c;
+  background: #fffaf0;
+}
+
+.student-experience .slot-card.special-price-card strong {
+  color: #765316;
+}
+
+.student-experience .slot-card.special-price-card small {
+  color: #61491b;
+}
+
 .student-experience .slot-card.booked {
   justify-items: center;
   color: #718078;
@@ -2812,6 +2825,170 @@ textarea:focus {
   margin-top: 18px;
 }
 
+.owner-pricing-page {
+  display: grid;
+  gap: 14px;
+}
+
+.owner-pricing-default {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(250px, 0.7fr);
+  align-items: center;
+  gap: 18px;
+}
+
+.owner-pricing-default h3 {
+  margin: 6px 0;
+  color: var(--owner-ink);
+  font-size: 1.7rem;
+}
+
+.owner-pricing-default h3 span,
+.owner-pricing-default > div > p:not(.owner-kicker) {
+  color: var(--owner-muted);
+  font-size: 0.9rem;
+}
+
+.owner-default-price-form,
+.owner-slot-price-form {
+  display: grid;
+  align-items: end;
+  gap: 12px;
+}
+
+.owner-default-price-form {
+  grid-template-columns: minmax(120px, 1fr) auto;
+}
+
+.owner-default-price-form label,
+.owner-slot-price-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--owner-ink);
+  font-size: 0.8rem;
+  font-weight: 750;
+}
+
+.owner-default-price-form label > span,
+.owner-rupee-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border: 1px solid var(--owner-line);
+  border-radius: 10px;
+  color: var(--owner-muted);
+  background: #fff;
+}
+
+.owner-default-price-form input,
+.owner-rupee-input input {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 0;
+  border: 0;
+  outline: 0;
+  color: var(--owner-ink);
+  background: transparent;
+  font: inherit;
+}
+
+.owner-slot-pricing .owner-panel-heading {
+  margin-bottom: 16px;
+}
+
+.owner-slot-price-form {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.owner-slot-price-form select,
+.owner-slot-price-form input[type="date"] {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  padding: 9px 10px;
+  border: 1px solid var(--owner-line);
+  border-radius: 10px;
+  color: var(--owner-ink);
+  background: #fff;
+  font: inherit;
+}
+
+.owner-slot-price-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.owner-current-slot-price {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px 16px;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: #f4f7f4;
+  color: var(--owner-muted);
+  font-size: 0.82rem;
+}
+
+.owner-current-slot-price strong {
+  color: var(--owner-ink);
+}
+
+.owner-current-slot-price small {
+  color: var(--owner-muted);
+}
+
+.owner-price-list {
+  display: grid;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.owner-price-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0;
+  border-top: 1px solid var(--owner-line);
+}
+
+.owner-price-row > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.owner-price-row > div:first-child strong,
+.owner-price-row > strong {
+  color: var(--owner-ink);
+  font-size: 0.86rem;
+}
+
+.owner-price-row > div:first-child span {
+  color: var(--owner-muted);
+  font-size: 0.77rem;
+}
+
+.owner-price-row > div:last-child {
+  display: flex;
+  gap: 6px;
+}
+
+.owner-pricing-notice {
+  margin: 0;
+  color: var(--owner-green);
+  font-size: 0.86rem;
+  font-weight: 750;
+}
+
+.owner-pricing-settings-link {
+  justify-self: start;
+}
+
 .owner-chart-panel {
   min-height: 300px;
 }
@@ -2918,6 +3095,20 @@ textarea:focus {
   .owner-list-grid,
   .owner-chart-grid {
     grid-template-columns: 1fr;
+  }
+
+  .owner-pricing-default,
+  .owner-default-price-form,
+  .owner-slot-price-form {
+    grid-template-columns: 1fr;
+  }
+
+  .owner-price-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .owner-price-row > div:last-child {
+    grid-column: 1 / -1;
   }
 
   .owner-insight-grid {

@@ -48,7 +48,8 @@ Sign in again after upgrading so the server can establish a role-checked session
 Copy `.env.example` to `.env` and provide a Firebase service account's project ID,
 client email, private key, and Realtime Database URL. With these credentials set,
 the server persists account records, bookings, and settings in Firebase. If Firebase
-is not configured, it uses `data/store.json`.
+is not configured, it uses `data/store.json`. Owner-managed slot price overrides are
+persisted alongside those records.
 
 To move an existing file-backed store into Firebase, run `npm run migrate:firebase`
 after configuring the credentials. Public REST demo mode is available only when
@@ -68,4 +69,6 @@ instead of implying that a message was sent.
 
 Owners can use Turf Settings to change the base fee, slot duration, timings, sports,
 section names, booking window, active-booking limit, and maintenance dates. New bookings
-keep the price that was active when they were created.
+keep the price that was active when they were created. The Pricing page can set a
+manual or promotional price for an upcoming date, section, and time slot; resetting
+that slot restores the default price. Only authenticated owners can manage prices.
