@@ -166,6 +166,8 @@ function App() {
   const [sportFilter, setSportFilter] = useState('All');
   const [showProfile, setShowProfile] = useState(false);
   const [ownerPage, setOwnerPage] = useState('dashboard');
+  const [pendingCancellation, setPendingCancellation] = useState(null);
+  const [skipCancellationConfirmation, setSkipCancellationConfirmation] = useState(false);
 
   const slots = useMemo(() => makeTimeSlots(settings), [settings]);
   const isOwner = currentUser?.role === 'owner';
@@ -180,7 +182,7 @@ function App() {
 
   const myBookings = currentUser
     ? bookings
-        .filter((booking) => booking.bookedBy === currentUser.id || (!booking.bookedBy && booking.phone === currentUser.phone))
+        .filter((booking) => booking.bookedBy === currentUser.id)
         .sort((a, b) => `${a.date}-${a.startHour}`.localeCompare(`${b.date}-${b.startHour}`))
     : [];
   const filteredBookings = (isOwner ? bookings : myBookings)
@@ -213,6 +215,8 @@ function App() {
       .catch(() => {
         localStorage.removeItem(STORAGE_KEYS.token);
         localStorage.removeItem(STORAGE_KEYS.user);
+        localStorage.removeItem(STORAGE_KEYS.bookings);
+        setBookings([]);
         setCurrentUser(null);
         setAuthMode('login');
         setAuthNotice('Your session expired. Please log in again.');
@@ -221,6 +225,20 @@ function App() {
         setSessionLoading(false);
       });
   }, []);
+
+  useEffect(() => {
+    if (!currentUser) {
+      setSkipCancellationConfirmation(false);
+      return;
+    }
+    try {
+      setSkipCancellationConfirmation(
+        localStorage.getItem(`turfcast-skip-cancel-confirmation:${currentUser.id}`) === 'true',
+      );
+    } catch {
+      setSkipCancellationConfirmation(false);
+    }
+  }, [currentUser?.id]);
 
   useEffect(() => {
     async function loadServerStore() {
@@ -263,9 +281,9 @@ function App() {
       endHour: bookingSlot.hour + settings.durationHours,
       section: bookingSlot.section,
       sport: get('sport'),
-      playerName: String(get('playerName') || '').trim(),
-      phone: String(get('phone') || '').trim(),
-      collegeId: String(get('collegeId') || '').trim(),
+      playerName: currentUser.name,
+      phone: currentUser.phone,
+      collegeId: currentUser.collegeId || '',
       bookedBy: currentUser.id,
       teamSize: Number(get('teamSize')) || 1,
       paymentMode: 'Pay at venue',
@@ -274,10 +292,6 @@ function App() {
       price: Number(settings.price),
       createdAt: new Date().toISOString(),
     };
-
-    if (!nextBooking.playerName || !nextBooking.phone) {
-      return { ok: false, message: 'Enter player name and phone number, then try again.' };
-    }
 
     if (!/^[6-9]\d{9}$/.test(nextBooking.phone)) {
       return { ok: false, message: 'Enter a valid 10-digit Indian phone number.' };
@@ -314,7 +328,13 @@ function App() {
       const store = await response.json();
       persistBookings(store.bookings);
       persistSettings(store.settings);
-      setReceiptBooking(store.bookings.find((booking) => booking.id === nextBooking.id) || nextBooking);
+      const savedBooking = store.bookings.find((booking) =>
+        booking.bookedBy === currentUser.id &&
+        booking.date === activeDate &&
+        booking.section === bookingSlot.section &&
+        Number(booking.startHour) === Number(bookingSlot.hour),
+      );
+      setReceiptBooking(savedBooking || nextBooking);
       setBookingConfirmed(true);
       setSyncStatus('Live');
     } catch {
@@ -332,18 +352,47 @@ function App() {
         method: 'DELETE',
         headers: authHeaders(),
       });
+      const result = await response.json();
       if (!response.ok) {
-        const result = await response.json();
-        throw new Error(result.message || 'Could not cancel booking.');
+        const message = result.message || 'Could not cancel booking.';
+        setAppMessage(message);
+        return { ok: false, message };
       }
-      const store = await response.json();
-      persistBookings(store.bookings);
+      persistBookings(result.bookings);
       setSyncStatus('Live');
       setAppMessage('');
+      return { ok: true };
     } catch (error) {
       setSyncStatus('Offline');
       setAppMessage(error.message || 'Booking could not be cancelled. Check your connection and try again.');
+      return { ok: false, message: error.message || 'Booking could not be cancelled. Check your connection and try again.' };
     }
+  }
+
+  function requestBookingCancellation(booking) {
+    const [year, month, day] = booking.date.split('-').map(Number);
+    const startTimestamp = Date.UTC(year, month - 1, day, Number(booking.startHour)) - 330 * 60 * 1000;
+    const withinCancellationWindow = startTimestamp <= Date.now() + 24 * 60 * 60 * 1000;
+    if (isOwner || skipCancellationConfirmation || withinCancellationWindow) {
+      return cancelBooking(booking.id);
+    }
+    setPendingCancellation(booking);
+    return Promise.resolve({ ok: true });
+  }
+
+  async function confirmBookingCancellation(booking, rememberChoice) {
+    const result = await cancelBooking(booking.id);
+    if (!result.ok) return result;
+    if (rememberChoice) {
+      try {
+        localStorage.setItem(`turfcast-skip-cancel-confirmation:${currentUser.id}`, 'true');
+        setSkipCancellationConfirmation(true);
+      } catch {
+        setAppMessage('Cancellation succeeded, but this device could not save your confirmation preference.');
+      }
+    }
+    setPendingCancellation(null);
+    return result;
   }
 
   async function saveSettings(nextSettings) {
@@ -450,8 +499,12 @@ function App() {
     }
     localStorage.removeItem(STORAGE_KEYS.user);
     localStorage.removeItem(STORAGE_KEYS.token);
+    localStorage.removeItem(STORAGE_KEYS.bookings);
     sessionStorage.removeItem('turf-admin');
     setCurrentUser(null);
+    setBookings([]);
+    setPendingCancellation(null);
+    setAuthRole('student');
     setAuthMode('home');
   }
 
@@ -478,26 +531,56 @@ function App() {
   }
 
   function exportBookings() {
-    const headers = ['Booking ID', 'Date', 'Section', 'Start', 'End', 'Sport', 'Name', 'Phone', 'Players', 'Price', 'Notes'];
+    const csvNumber = (value) => {
+      if (value === null || value === undefined || value === '') return '';
+      const number = Number(value);
+      return Number.isFinite(number) ? number : '';
+    };
+    const headers = [
+      'Booking ID',
+      'Student Name',
+      'Phone',
+      'College ID',
+      'Sport',
+      'Date',
+      'Time',
+      'Section',
+      'Players',
+      'Price (INR)',
+      'Payment Status',
+      'Booking Status',
+      'Notes',
+      'Created At',
+    ];
     const rows = bookings.map((booking) => [
       booking.id,
-      booking.date,
-      booking.section,
-      formatHour(booking.startHour),
-      formatHour(booking.endHour),
-      booking.sport,
       booking.playerName,
       booking.phone,
-      booking.teamSize,
-      booking.price,
+      booking.collegeId,
+      booking.sport,
+      formatDate(booking.date),
+      `${formatHour(booking.startHour)} - ${formatHour(booking.endHour)}`,
+      booking.section,
+      csvNumber(booking.teamSize),
+      csvNumber(booking.price),
+      booking.paymentStatus === 'paid' ? 'Paid' : booking.paymentStatus === 'refunded' ? 'Refunded' : 'Unpaid',
+      booking.cancelledAt ? 'Cancelled' : 'Confirmed',
       booking.notes,
+      booking.createdAt && Number.isFinite(new Date(booking.createdAt).getTime())
+        ? new Date(booking.createdAt).toLocaleString('en-IN')
+        : '',
     ]);
 
+    const csvCell = (cell) => {
+      const value = String(cell ?? '').replace(/\r\n?|\n/g, ' ');
+      const safeValue = /^[\s\uFEFF]*[=+\-@]/.test(value) ? `'${value}` : value;
+      return `"${safeValue.replaceAll('"', '""')}"`;
+    };
     const csv = [headers, ...rows]
-      .map((row) => row.map((cell) => `"${String(cell ?? '').replaceAll('"', '""')}"`).join(','))
+      .map((row) => row.map((cell) => typeof cell === 'number' ? String(cell) : csvCell(cell)).join(','))
       .join('\n');
 
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const blob = new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -738,8 +821,8 @@ function App() {
                 {isOwner
                   ? <button className="icon-button" type="button" onClick={() => { setBookingConfirmed(false); setReceiptBooking(booking); }} title="View receipt"><Eye size={18} /></button>
                   : <button className="ghost-button booking-detail-button" type="button" onClick={() => { setBookingConfirmed(false); setReceiptBooking(booking); }} title="View booking confirmation"><span>Details</span></button>}
-                {(!booking.cancelledAt && (isOwner || ((booking.bookedBy === currentUser.id || (!booking.bookedBy && booking.phone === currentUser.phone)) && new Date(`${booking.date}T${String(booking.startHour).padStart(2, '0')}:00:00`) > new Date()))) &&
-                  <button className="danger-button" type="button" onClick={() => cancelBooking(booking.id)} title="Cancel booking"><Trash2 size={18} /></button>}
+                {(!booking.cancelledAt && (isOwner || booking.bookedBy === currentUser.id)) &&
+                  <button className="danger-button" type="button" onClick={() => requestBookingCancellation(booking)} title="Cancel booking"><Trash2 size={18} /></button>}
               </article>
             ))
           )}
@@ -780,6 +863,11 @@ function App() {
         />
       )}
       {showProfile && <ProfileModal user={currentUser} onClose={() => setShowProfile(false)} onSave={saveProfile} />}
+      {pendingCancellation && <CancellationConfirmModal
+        booking={pendingCancellation}
+        onClose={() => setPendingCancellation(null)}
+        onConfirm={(rememberChoice) => confirmBookingCancellation(pendingCancellation, rememberChoice)}
+      />}
 
     </main>
   );
@@ -1001,6 +1089,7 @@ function AuthPanel({ mode, authError, authNotice, authLoading, role, onRoleChang
           </label> : <>
             <label>Business / Turf Name<div className="input-with-icon"><Trophy size={18} /><input name="businessName" type="text" placeholder="College turf" /></div></label>
             <label>Owner Title<div className="input-with-icon"><UserRound size={18} /><input name="ownerTitle" type="text" placeholder="Owner or administrator" /></div></label>
+            <label>Owner Invitation Code<div className="input-with-icon"><Lock size={18} /><input name="ownerSignupCode" type="password" autoComplete="off" required /></div></label>
           </>}
         </>
       ) : (
@@ -1441,18 +1530,27 @@ function BookingModal({ settings, selectedSlot, activeDate, selectedSport, curre
 
         <label>
           Player Name
-          <input name="playerName" type="text" placeholder="Student or team captain" defaultValue={currentUser.name} autoFocus />
+          <input name="playerName" type="text" value={currentUser.name} readOnly autoFocus />
         </label>
 
         <label>
           Phone Number
-          <input name="phone" type="tel" placeholder="9876543210" defaultValue={currentUser.phone} />
+          <input name="phone" type="tel" value={currentUser.phone} readOnly />
         </label>
 
-        <input type="hidden" name="collegeId" value={currentUser.collegeId || ''} />
+        {currentUser.collegeId && <label>
+          College ID
+          <input name="collegeId" type="text" value={currentUser.collegeId} readOnly />
+        </label>}
         <input type="hidden" name="sport" value={selectedSport} />
-        <input type="hidden" name="teamSize" value="10" />
-        <input type="hidden" name="notes" value="" />
+        <label>
+          Number of players
+          <input name="teamSize" type="number" min="1" step="1" defaultValue="10" required />
+        </label>
+        <label>
+          Notes (optional)
+          <textarea name="notes" rows="2" maxLength="500" placeholder="Anything the turf team should know?" />
+        </label>
 
         {error && <p className="form-error">{error}</p>}
 
@@ -1461,6 +1559,57 @@ function BookingModal({ settings, selectedSlot, activeDate, selectedSport, curre
           <button className="primary-button" type="submit" disabled={saving}>
             <CreditCard size={18} />
             <span>{saving ? 'Saving' : 'Confirm Booking'}</span>
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function CancellationConfirmModal({ booking, onClose, onConfirm }) {
+  const [rememberChoice, setRememberChoice] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  async function confirm(event) {
+    event.preventDefault();
+    setSaving(true);
+    setError('');
+    const result = await onConfirm(rememberChoice);
+    setSaving(false);
+    if (!result.ok) setError(result.message || 'Could not cancel this booking.');
+  }
+
+  return (
+    <div className="modal-backdrop">
+      <form className="modal cancellation-confirmation" onSubmit={confirm} role="dialog" aria-modal="true" aria-labelledby="cancel-booking-title">
+        <div className="modal-header">
+          <div>
+            <p>Booking cancellation</p>
+            <h2 id="cancel-booking-title">Cancel this booking?</h2>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} title="Close" disabled={saving}>
+            <X size={20} />
+          </button>
+        </div>
+        <div className="slot-summary">
+          <span><small>Date</small>{formatDate(booking.date)}</span>
+          <span><small>Time</small>{formatHour(booking.startHour)}-{formatHour(booking.endHour)}</span>
+          <span><small>Section</small>{booking.section}</span>
+        </div>
+        <label className="confirmation-preference">
+          <input
+            type="checkbox"
+            checked={rememberChoice}
+            onChange={(event) => setRememberChoice(event.target.checked)}
+          />
+          Don't ask me again on this device
+        </label>
+        {error && <p className="form-error" role="alert">{error}</p>}
+        <div className="modal-actions">
+          <button className="ghost-button" type="button" onClick={onClose} disabled={saving}>Keep booking</button>
+          <button className="danger-button" type="submit" disabled={saving}>
+            {saving ? 'Cancelling' : 'Cancel booking'}
           </button>
         </div>
       </form>

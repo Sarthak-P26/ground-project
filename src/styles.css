@@ -1690,6 +1690,20 @@ textarea:focus {
   font-weight: 800;
 }
 
+.confirmation-preference {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: #46534b;
+  font-weight: 700;
+}
+
+.confirmation-preference input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+}
+
 @media (max-width: 980px) {
   .auth-product-band {
     grid-template-columns: 1fr;

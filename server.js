@@ -137,6 +137,11 @@ const normalizePhone = (value = '') => {
   const digits = String(value).replace(/\D/g, '').replace(/^0+/, '');
   return digits.length === 12 && digits.startsWith('91') ? digits.slice(2) : digits.slice(-10);
 };
+const constantTimeEquals = (left, right) => {
+  const leftBuffer = Buffer.from(String(left));
+  const rightBuffer = Buffer.from(String(right));
+  return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+};
 const normalizeIdentifier = (value = '') => {
   const input = String(value).trim();
   if (!input) return '';
@@ -147,10 +152,7 @@ const publicStoreForUser = (store, user) => ({
   bookings: user?.role === 'owner'
     ? publicStore(store).bookings
     : publicStore(store).bookings.map((booking) => {
-        const ownBooking = user && (
-          booking.bookedBy === user.id ||
-          (!booking.bookedBy && normalizePhone(booking.phone) === user.phone)
-        );
+        const ownBooking = user && booking.bookedBy === user.id;
         if (ownBooking) return booking;
         return {
           id: booking.id,
@@ -176,6 +178,27 @@ const publicUser = (u) => u && ({
   createdAt: u.createdAt,
 });
 const publicStore = (s) => ({ settings: s.settings, bookings: (s.bookings || []).map(normalizeBooking) });
+function configuredAppUrl() {
+  const configuredUrl = String(process.env.APP_BASE_URL || '').trim();
+  if (!configuredUrl) return null;
+  try {
+    const url = new URL(configuredUrl);
+    const isLocalHttp = url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+    if ((!isLocalHttp && url.protocol !== 'https:') || url.username || url.password || url.search || url.hash) return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+function bookingStartTimestamp(date, hour) {
+  const [year, month, day] = date.split('-').map(Number);
+  return Date.UTC(year, month - 1, day, Number(hour)) - 330 * 60 * 1000;
+}
+function isValidDateValue(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
 const route = (fn) => async (req, res, next) => { try { await fn(req, res); } catch (e) { next(e); } };
 
 app.get('/api/store', route(async (req, res) => {
@@ -183,8 +206,11 @@ app.get('/api/store', route(async (req, res) => {
   res.json(publicStoreForUser(store, authenticatedUser(store, req)));
 }));
 app.get('/api/weather-risk', route(async (req, res) => res.json(await weatherRisk(String(req.query.date || today()), Number(req.query.hour || 18)))));
-app.get('/api/forecast', route(async (_req, res) => {
+app.get('/api/forecast', route(async (req, res) => {
   const store = await readStore();
+  if (authenticatedUser(store, req)?.role !== 'owner') {
+    return res.status(403).json({ message: 'Owner access is required to view the forecast.' });
+  }
   const historical = await readHistoricalBookings();
   const data = [];
   for (let day = 0; day < 7; day += 1) {
@@ -206,6 +232,9 @@ app.get('/api/forecast', route(async (_req, res) => {
 }));
 app.get('/api/price-suggestions', route(async (req, res) => {
   const store = await readStore();
+  if (authenticatedUser(store, req)?.role !== 'owner') {
+    return res.status(403).json({ message: 'Owner access is required to view pricing suggestions.' });
+  }
   const date = String(req.query.date || today());
   const historical = await readHistoricalBookings();
   const all = [...historical, ...store.bookings];
@@ -233,9 +262,14 @@ app.post('/api/auth/signup', route(async (req, res) => {
     const email = normalizeEmail(req.body.email);
     const phone = normalizePhone(req.body.phone);
     const password = String(req.body.password || '');
-    const role = String(req.body.role || 'student');
+    const requestedRole = String(req.body.role || 'student');
     if (!name || !email || !phone || !password) return { status: 400, body: { message: 'Name, email, phone, and password are required.' } };
-    if (!['student', 'owner'].includes(role)) return { status: 400, body: { message: 'Choose student or owner account type.' } };
+    if (!['student', 'owner'].includes(requestedRole)) return { status: 400, body: { message: 'Choose student or owner account type.' } };
+    const ownerSignupCode = String(process.env.OWNER_SIGNUP_CODE || '');
+    if (requestedRole === 'owner' && (!ownerSignupCode || !constantTimeEquals(req.body.ownerSignupCode || '', ownerSignupCode))) {
+      return { status: 403, body: { message: 'A valid owner invitation code is required to create an owner account.' } };
+    }
+    const role = requestedRole;
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { status: 400, body: { message: 'Enter a valid email address.' } };
     if (!/^[6-9]\d{9}$/.test(phone)) return { status: 400, body: { message: 'Enter a valid 10-digit Indian phone number.' } };
     if (password.length < 6) return { status: 400, body: { message: 'Password must be at least 6 characters.' } };
@@ -338,6 +372,12 @@ app.post('/api/auth/forgot-password', route(async (req, res) => {
       message: 'Password email is not configured. Add SMTP_USER and SMTP_APP_PASSWORD to the server .env file.',
     });
   }
+  const baseUrl = configuredAppUrl();
+  if (!baseUrl) {
+    return res.status(503).json({
+      message: 'Password reset is not configured. Set APP_BASE_URL to the canonical application URL.',
+    });
+  }
   const reset = await withStoreLock(async () => {
     const store = await readStore();
     const identifier = normalizeIdentifier(req.body.identifier);
@@ -349,7 +389,6 @@ app.post('/api/auth/forgot-password', route(async (req, res) => {
     return { userId: user.id, email: user.email, token };
   });
   if (reset) {
-    const baseUrl = (process.env.APP_BASE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
     const resetLink = `${baseUrl}/?reset=${encodeURIComponent(reset.token)}`;
     try {
       await mailTransport.sendMail({
@@ -421,29 +460,41 @@ app.post('/api/bookings', route(async (req, res) => {
     const user = authenticatedUser(store, req);
     if (!user || user.role !== 'student') return { status: 403, body: { message: 'A student account is required to make a booking.' } };
     const settings = store.settings;
+    const date = String(req.body.date || '');
+    const startHour = Number(req.body.startHour);
+    const teamSize = Number(req.body.teamSize ?? 1);
     const booking = {
-      ...req.body,
-      id: req.body.id || `BK-${Date.now().toString(36).toUpperCase()}`,
-      playerName: String(req.body.playerName || '').trim(),
-      phone: String(req.body.phone || '').trim(),
-      collegeId: String(req.body.collegeId || '').trim(),
+      id: `BK-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`,
+      date,
+      section: String(req.body.section || '').trim(),
+      sport: String(req.body.sport || '').trim(),
+      playerName: String(user.name || '').trim(),
+      phone: normalizePhone(user.phone),
+      collegeId: String(user.collegeId || '').trim(),
       bookedBy: user.id,
       paymentMode: 'Pay at venue',
       paymentStatus: 'unpaid',
       price: Number(settings.price),
-      startHour: Number(req.body.startHour),
-      endHour: Number(req.body.startHour) + Number(settings.durationHours),
-      teamSize: Number(req.body.teamSize || 1),
-      createdAt: req.body.createdAt || new Date().toISOString(),
+      startHour,
+      endHour: startHour + Number(settings.durationHours),
+      teamSize,
+      notes: String(req.body.notes || '').trim(),
+      createdAt: new Date().toISOString(),
     };
-    if (!booking.date || !booking.section || !booking.playerName || !booking.phone) {
+    if (!booking.date || !booking.section || !booking.sport || !booking.playerName || !booking.phone) {
       return { status: 400, body: { message: 'Missing booking details.' } };
     }
     if (!/^[6-9]\d{9}$/.test(booking.phone)) {
       return { status: 400, body: { message: 'Enter a valid 10-digit Indian phone number.' } };
     }
+    if (!isValidDateValue(booking.date) || !Number.isSafeInteger(teamSize) || teamSize < 1) {
+      return { status: 400, body: { message: 'Enter a valid booking date and number of players.' } };
+    }
     if (!settings.sections.includes(booking.section) || !settings.sports.includes(booking.sport) || !slots(settings).includes(booking.startHour)) {
       return { status: 400, body: { message: 'Invalid booking details.' } };
+    }
+    if (bookingStartTimestamp(booking.date, booking.startHour) <= Date.now()) {
+      return { status: 400, body: { message: 'This time slot has already started.' } };
     }
     if (settings.maintenanceDates.includes(booking.date)) {
       return { status: 400, body: { message: 'This date is blocked for maintenance.' } };
@@ -486,18 +537,18 @@ app.delete('/api/bookings/:id', route(async (req, res) => {
     if (!user) return { status: 403, body: { message: 'Sign in to manage this booking.' } };
     const booking = store.bookings.find((item) => item.id === req.params.id);
     if (!booking) return { status: 404, body: { message: 'Booking not found.' } };
-    if (user.role !== 'owner' && (booking.bookedBy ? booking.bookedBy !== user.id : booking.phone !== user.phone)) {
+    if (user.role !== 'owner' && booking.bookedBy !== user.id) {
       return { status: 403, body: { message: 'You can only cancel your own booking.' } };
     }
     if (booking.cancelledAt) return { status: 409, body: { message: 'This booking has already been cancelled.' } };
-    if (user.role !== 'owner' && new Date(`${booking.date}T${String(booking.startHour).padStart(2, '0')}:00:00`) <= new Date()) {
-      return { status: 400, body: { message: 'This booking can no longer be cancelled online.' } };
+    if (user.role !== 'owner' && bookingStartTimestamp(booking.date, booking.startHour) <= Date.now() + 24 * 60 * 60 * 1000) {
+      return { status: 400, body: { message: 'Bookings can only be cancelled at least 24 hours before their start time.' } };
     }
     booking.cancelledAt = new Date().toISOString();
     booking.paymentStatus = 'refunded';
     booking.paymentMode = 'Pay at venue';
     await writeStore(store);
-    return { status: 200, body: publicStore(store) };
+    return { status: 200, body: publicStoreForUser(store, user) };
   });
   res.status(result.status).json(result.body);
 }));
