@@ -40,17 +40,29 @@ const normalizeBooking = (booking = {}) => ({
   paymentMode: booking.paymentMode === 'UPI' ? 'Pay at venue' : (booking.paymentMode || 'Pay at venue'),
   paymentStatus: booking.paymentStatus === 'cancelled' ? 'refunded' : (booking.paymentStatus || 'unpaid'),
 });
-const normalizeStore = (store = {}) => {
+const rolesNeedMigration = Symbol('rolesNeedMigration');
+function normalizeUserRoles(users) {
+  let needsMigration = false;
+  const normalizedUsers = list(users || []).map((user) => {
+    const role = user.role === 'owner' ? 'owner' : 'student';
+    if (role !== user.role) needsMigration = true;
+    return { ...user, role };
+  });
+  return { users: normalizedUsers, needsMigration };
+}
+const normalizeStore = (store = {}, forceRoleMigration = false) => {
   const storedSettings = { ...(store.settings || {}) };
+  const normalizedUsers = normalizeUserRoles(store.users);
   delete storedSettings.adminPin;
-  return {
-  settings: { ...defaults.settings, ...storedSettings },
-  bookings: list(store.bookings || []).map(normalizeBooking),
-  users: list(store.users || []).map((user) => ({
-    ...user,
-    role: user.role === 'owner' ? 'owner' : 'student',
-  })),
+  const normalized = {
+    settings: { ...defaults.settings, ...storedSettings },
+    bookings: list(store.bookings || []).map(normalizeBooking),
+    users: normalizedUsers.users,
   };
+  Object.defineProperty(normalized, rolesNeedMigration, {
+    value: forceRoleMigration || normalizedUsers.needsMigration,
+  });
+  return normalized;
 };
 const storePath = path.join(__dirname, 'data', 'store.json');
 async function readFileStore() {
@@ -66,12 +78,13 @@ async function readStore() {
   if (!db) return fileStore;
   const [settings, bookings, users] = await Promise.all(['settings', 'bookings', 'users'].map((node) => db.ref(node).once('value')));
   const mergedUsers = new Map(fileStore.users.map((user) => [user.id, user]));
-  for (const user of list(users.val() || [])) mergedUsers.set(user.id, user);
+  const firebaseUsers = list(users.val() || []);
+  for (const user of firebaseUsers) mergedUsers.set(user.id, user);
   return normalizeStore({
     settings: settings.val() || {},
     bookings: bookings.val() || [],
     users: [...mergedUsers.values()],
-  });
+  }, fileStore[rolesNeedMigration] || firebaseUsers.some((user) => !['student', 'owner'].includes(user.role)));
 }
 const rainyPattern = (date, hour = 18) => { const d = new Date(`${date}T${String(hour).padStart(2, '0')}:00:00`).getTime() / 86400000, p = Math.max(8, Math.min(92, Math.round(36 + (Math.sin(d * .74) + Math.sin(d * .21)) * 25))); return { probability: p, risk: p >= 65 ? 'High' : p >= 35 ? 'Medium' : 'Low', source: 'demo forecast' }; };
 async function weatherRisk(date, hour) { if (!process.env.OPENWEATHER_API_KEY) return rainyPattern(date, hour); try { const r = await fetch(`https://api.openweathermap.org/data/2.5/forecast?q=Delhi,IN&appid=${process.env.OPENWEATHER_API_KEY}`), j = await r.json(), target = new Date(`${date}T${String(hour).padStart(2, '0')}:00:00`).getTime(), items = j.list || [], item = items.filter((x) => x.dt_txt?.startsWith(date)).sort((a, b) => Math.abs(new Date(a.dt_txt).getTime() - target) - Math.abs(new Date(b.dt_txt).getTime() - target))[0]; if (!item) return rainyPattern(date, hour); const p = Math.round((item.pop || 0) * 100); return { probability: p, risk: p >= 65 ? 'High' : p >= 35 ? 'Medium' : 'Low', source: 'OpenWeatherMap' }; } catch { return rainyPattern(date, hour); } }
@@ -91,6 +104,9 @@ async function writeUsers(users) {
   const store = await readFileStore();
   store.users = users;
   await writeFileStore(store);
+}
+async function persistRoleMigration(store) {
+  if (store[rolesNeedMigration]) await writeUsers(store.users);
 }
 let storeMutationQueue = Promise.resolve();
 function withStoreLock(operation) {
@@ -249,12 +265,12 @@ app.post('/api/auth/signup', route(async (req, res) => {
 app.post('/api/auth/login', route(async (req, res) => {
   const result = await withStoreLock(async () => {
     const store = await readStore();
+    await persistRoleMigration(store);
     const identifier = normalizeIdentifier(req.body.identifier);
     const user = store.users.find((record) => normalizeEmail(record.email) === identifier || normalizePhone(record.phone) === identifier);
     if (!user || !matches(String(req.body.password || ''), user.passwordHash)) {
       return { status: 401, body: { message: 'Incorrect email/phone or password. Please try again.' } };
     }
-    if (!user.role) user.role = 'student';
     if (req.body.role && req.body.role !== user.role) {
       return { status: 403, body: { message: `This account is registered as a ${user.role}.` } };
     }
@@ -266,10 +282,14 @@ app.post('/api/auth/login', route(async (req, res) => {
   res.status(result.status).json(result.body);
 }));
 app.get('/api/auth/session', route(async (req, res) => {
-  const store = await readStore();
-  const user = authenticatedUser(store, req);
-  if (!user) return res.status(401).json({ message: 'Please log in again to continue.' });
-  res.json({ user: publicUser(user) });
+  const result = await withStoreLock(async () => {
+    const store = await readStore();
+    await persistRoleMigration(store);
+    const user = authenticatedUser(store, req);
+    if (!user) return { status: 401, body: { message: 'Please log in again to continue.' } };
+    return { status: 200, body: { user: publicUser(user) } };
+  });
+  res.status(result.status).json(result.body);
 }));
 app.post('/api/auth/logout', route(async (req, res) => {
   const result = await withStoreLock(async () => {
