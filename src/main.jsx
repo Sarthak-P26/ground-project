@@ -197,7 +197,25 @@ function App() {
       const matchesSport = sportFilter === 'All' || booking.sport === sportFilter;
       if (!matchesSport) return false;
       if (!q) return true;
-      return [booking.playerName, booking.phone, booking.sport, booking.section, booking.id]
+      const searchableValues = isOwner
+        ? [
+            booking.playerName,
+            booking.phone,
+            booking.sport,
+            booking.section,
+            booking.id,
+            booking.date,
+            formatDate(booking.date),
+            formatHour(booking.startHour),
+            formatHour(booking.endHour),
+            booking.teamSize,
+            booking.price,
+            booking.paymentMode,
+            booking.paymentStatus,
+            booking.cancelledAt ? 'cancelled' : 'confirmed',
+          ]
+        : [booking.playerName, booking.phone, booking.sport, booking.section, booking.id];
+      return searchableValues
         .join(' ')
         .toLowerCase()
         .includes(q);
@@ -1207,9 +1225,11 @@ function OwnerExperience({
 
       {page === 'dashboard' && (
         <OwnerDashboard
-          bookings={activeBookings}
+          bookings={bookings}
           settings={settings}
           onOpenBookings={() => onPageChange('bookings')}
+          onMarkPaid={onMarkPaid}
+          onCancelBooking={onCancelBooking}
           onViewBooking={onViewBooking}
         />
       )}
@@ -1234,51 +1254,79 @@ function OwnerExperience({
   );
 }
 
-function OwnerDashboard({ bookings, settings, onOpenBookings, onViewBooking }) {
+function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCancelBooking, onViewBooking }) {
   const today = toDateInput(new Date());
   const todayDate = new Date(`${today}T00:00:00`);
   const weekStart = new Date(todayDate);
   weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7));
   const monthStart = `${today.slice(0, 7)}-01`;
   const inRange = (booking, start, end = today) => booking.date >= start && booking.date <= end;
+  const activeBookings = bookings.filter((booking) => !booking.cancelledAt);
   const collectedRevenue = (items) => items
     .filter((booking) => booking.paymentStatus === 'paid')
     .reduce((sum, booking) => sum + Number(booking.price || 0), 0);
-  const todayBookings = bookings.filter((booking) => booking.date === today);
-  const weekBookings = bookings.filter((booking) => inRange(booking, toDateInput(weekStart)));
-  const monthBookings = bookings.filter((booking) => inRange(booking, monthStart));
+  const todayBookings = activeBookings.filter((booking) => booking.date === today);
+  const weekBookings = activeBookings.filter((booking) => inRange(booking, toDateInput(weekStart)));
+  const monthBookings = activeBookings.filter((booking) => inRange(booking, monthStart));
   const capacity = makeTimeSlots(settings).length * settings.sections.length;
   const occupancy = capacity ? Math.round((todayBookings.length / capacity) * 100) : 0;
-  const upcoming = bookings
-    .filter((booking) => booking.date >= today)
-    .sort((a, b) => `${a.date}-${a.startHour}`.localeCompare(`${b.date}-${b.startHour}`))
-    .slice(0, 5);
-  const recent = [...bookings]
-    .sort((a, b) => (b.createdAt || `${b.date}T00:00:00`).localeCompare(a.createdAt || `${a.date}T00:00:00`))
-    .slice(0, 5);
-  const slots = makeTimeSlots(settings);
-  const bookingsByTime = slots.map((hour) => ({
-    hour,
-    count: bookings.filter((booking) => Number(booking.startHour) === hour).length,
-  }));
-  const busiest = bookingsByTime.reduce((best, item) => item.count > best.count ? item : best, { hour: null, count: 0 });
-  const leastUsed = bookingsByTime.reduce((least, item) => item.count < least.count ? item : least, { hour: null, count: Infinity });
-  const sports = bookings.reduce((counts, booking) => {
-    counts[booking.sport] = (counts[booking.sport] || 0) + 1;
-    return counts;
-  }, {});
-  const popularSport = Object.entries(sports).sort((a, b) => b[1] - a[1])[0]?.[0];
+  const upcomingBookings = activeBookings
+    .filter((booking) => booking.date >= today);
+  const upcomingCount = upcomingBookings.length;
+  const upcoming = [...upcomingBookings].sort((a, b) =>
+    `${a.date}-${a.startHour}`.localeCompare(`${b.date}-${b.startHour}`),
+  );
   const metrics = [
     { label: "Today's Bookings", value: todayBookings.length, note: 'Reservations scheduled today' },
     { label: "Today's Revenue", value: currency(collectedRevenue(todayBookings)), note: 'Payments collected' },
+    { label: "Today's Occupancy", value: `${occupancy}%`, note: `${todayBookings.length} of ${capacity} available slots` },
+    { label: 'Upcoming Bookings', value: upcomingCount, note: 'Next scheduled reservations' },
+  ];
+  const secondaryMetrics = [
     { label: "This Week's Revenue", value: currency(collectedRevenue(weekBookings)), note: 'Payments collected this week' },
     { label: "This Month's Revenue", value: currency(collectedRevenue(monthBookings)), note: 'Payments collected this month' },
-    { label: "Today's Occupancy", value: `${occupancy}%`, note: `${todayBookings.length} of ${capacity} available slots` },
+    { label: 'Total Bookings', value: bookings.length, note: 'All bookings, including history' },
   ];
+  const attentionBookings = activeBookings
+    .filter((booking) => booking.date >= today && booking.paymentStatus !== 'paid')
+    .sort((a, b) => `${a.date}-${a.startHour}`.localeCompare(`${b.date}-${b.startHour}`))
+    .slice(0, 6);
+  const historyStart = new Date(`${today}T00:00:00`);
+  historyStart.setDate(historyStart.getDate() - 27);
+  const historyStartDate = toDateInput(historyStart);
+  const observedBookings = activeBookings.filter((booking) => booking.date >= historyStartDate && booking.date <= today);
+  const slotHours = makeTimeSlots(settings);
+  const opportunities = [];
+  for (let weekday = 0; weekday < 7; weekday += 1) {
+    const weekdayDates = Array.from({ length: 28 }, (_, index) => {
+      const date = new Date(`${historyStartDate}T00:00:00`);
+      date.setDate(date.getDate() + index);
+      return date.getDay() === weekday;
+    }).filter(Boolean).length;
+    for (const hour of slotHours) {
+      const count = observedBookings.filter((booking) =>
+        new Date(`${booking.date}T00:00:00`).getDay() === weekday && Number(booking.startHour) === hour,
+      ).length;
+      const periodCapacity = weekdayDates * settings.sections.length;
+      opportunities.push({
+        weekday,
+        hour,
+        count,
+        utilization: periodCapacity ? count / periodCapacity : 0,
+      });
+    }
+  }
+  const lowDemand = [...opportunities].sort((a, b) => a.utilization - b.utilization).slice(0, 3);
+  const highDemand = [...opportunities].filter((period) => period.count > 0)
+    .sort((a, b) => b.utilization - a.utilization).slice(0, 2);
+  const formatOpportunity = ({ weekday, hour }) => {
+    const dayLabel = new Intl.DateTimeFormat('en-IN', { weekday: 'long' }).format(new Date(2024, 0, 7 + weekday));
+    return `${dayLabel} ${formatHour(hour)}–${formatHour(hour + settings.durationHours)}`;
+  };
 
   return (
     <div className="owner-page-content">
-      <section className="owner-metric-grid" aria-label="Turf performance today">
+      <section className="owner-metric-grid owner-primary-metrics" aria-label="Key turf metrics">
         {metrics.map((metric) => (
           <article className="owner-metric" key={metric.label}>
             <span>{metric.label}</span>
@@ -1288,43 +1336,85 @@ function OwnerDashboard({ bookings, settings, onOpenBookings, onViewBooking }) {
         ))}
       </section>
 
-      <section className="owner-panel owner-insight-grid">
-        <article className="owner-insight">
-          <span>Most popular sport</span>
-          <strong>{popularSport || 'No bookings yet'}</strong>
-          <small>{popularSport ? `${sports[popularSport]} active bookings` : 'Popularity will appear when bookings are recorded.'}</small>
-        </article>
-        <article className="owner-insight">
-          <span>Busiest time</span>
-          <strong>{busiest.count ? `${formatHour(busiest.hour)}–${formatHour(busiest.hour + settings.durationHours)}` : 'No booking data'}</strong>
-          <small>{busiest.count ? `${busiest.count} booking${busiest.count === 1 ? '' : 's'} in stored records` : 'No time period has bookings yet.'}</small>
-        </article>
-        <article className="owner-insight">
-          <span>Lowest utilization period</span>
-          <strong>{!bookings.length ? 'No booking data' : leastUsed.hour === null ? 'No slots configured' : `${formatHour(leastUsed.hour)}–${formatHour(leastUsed.hour + settings.durationHours)}`}</strong>
-          <small>{bookings.length ? `${leastUsed.count} booking${leastUsed.count === 1 ? '' : 's'} in stored records` : 'A least-used period appears after bookings are recorded.'}</small>
-        </article>
+      <section className="owner-metric-grid owner-secondary-metrics" aria-label="Revenue and total bookings">
+        {secondaryMetrics.map((metric) => (
+          <article className="owner-metric" key={metric.label}>
+            <span>{metric.label}</span>
+            <strong>{metric.value}</strong>
+            <small>{metric.note}</small>
+          </article>
+        ))}
       </section>
 
-      <div className="owner-list-grid">
-        <OwnerBookingPreview title="Upcoming bookings" bookings={upcoming} onViewBooking={onViewBooking} />
-        <OwnerBookingPreview title="Recent bookings" bookings={recent} onViewBooking={onViewBooking} />
-      </div>
+      <OwnerAttentionBookings
+        bookings={attentionBookings}
+        onViewBooking={onViewBooking}
+        onMarkPaid={onMarkPaid}
+        onCancelBooking={onCancelBooking}
+      />
+      <OwnerBookingOpportunities
+        hasHistory={observedBookings.length > 0}
+        lowDemand={lowDemand}
+        highDemand={highDemand}
+        formatPeriod={formatOpportunity}
+      />
       <button className="owner-inline-link" type="button" onClick={onOpenBookings}>Open booking management <ArrowRight size={16} /></button>
     </div>
   );
 }
 
-function OwnerBookingPreview({ title, bookings, onViewBooking }) {
+function OwnerAttentionBookings({ bookings, onViewBooking, onMarkPaid, onCancelBooking }) {
   return (
-    <section className="owner-panel owner-preview">
-      <div className="owner-panel-heading"><h3>{title}</h3><span>{bookings.length}</span></div>
+    <section className="owner-panel owner-attention-panel">
+      <div className="owner-panel-heading">
+        <div><h3>Bookings needing attention</h3><p>Upcoming reservations with payment still due.</p></div>
+        <span>{bookings.length}</span>
+      </div>
       {bookings.length ? bookings.map((booking) => (
-        <button className="owner-preview-row" type="button" key={booking.id} onClick={() => onViewBooking(booking)}>
-          <span><strong>{booking.playerName}</strong><small>{formatDate(booking.date)} · {formatHour(booking.startHour)} · {booking.section}</small></span>
-          <span className={`owner-status ${booking.cancelledAt ? 'cancelled' : 'active'}`}>{booking.cancelledAt ? 'Cancelled' : booking.sport}</span>
-        </button>
-      )) : <p className="owner-empty-note">No booking records yet.</p>}
+        <article className="owner-attention-row" key={booking.id}>
+          <div className="owner-attention-student">
+            <strong>{booking.playerName}</strong>
+            <span>{booking.sport} · {formatDate(booking.date)} · {formatHour(booking.startHour)}–{formatHour(booking.endHour)} · {booking.section} · {booking.teamSize || 1} players</span>
+          </div>
+          <strong className="owner-attention-price">{currency(booking.price)}</strong>
+          <span className="owner-status pending">{booking.paymentStatus === 'refunded' ? 'Refunded' : 'Unpaid'}</span>
+          <div className="owner-booking-actions">
+            <button className="owner-action-button" type="button" onClick={() => onViewBooking(booking)} aria-label={`View ${booking.playerName}'s booking`}><Eye size={16} /></button>
+            {booking.paymentStatus !== 'paid' && booking.paymentStatus !== 'refunded' && <button className="owner-action-button" type="button" onClick={() => onMarkPaid(booking.id)}>Collect</button>}
+            <button className="owner-action-button danger" type="button" onClick={() => onCancelBooking(booking.id)} aria-label={`Cancel ${booking.playerName}'s booking`}><Trash2 size={16} /></button>
+          </div>
+        </article>
+      )) : <p className="owner-empty-note">No upcoming unpaid bookings.</p>}
+    </section>
+  );
+}
+
+function OwnerBookingOpportunities({ hasHistory, lowDemand, highDemand, formatPeriod }) {
+  return (
+    <section className="owner-panel owner-opportunities-panel">
+      <div className="owner-panel-heading">
+        <div><h3>Booking opportunities</h3><p>Utilization patterns from the last 28 days of booking records.</p></div>
+      </div>
+      {hasHistory ? <div className="owner-opportunity-grid">
+        <div>
+          <h4>Lower utilization</h4>
+          {lowDemand.map((period) => (
+            <div className="owner-opportunity-row" key={`low-${period.weekday}-${period.hour}`}>
+              <span>{formatPeriod(period)}</span>
+              <strong>{period.count === 0 ? 'No bookings' : 'Low demand'}</strong>
+            </div>
+          ))}
+        </div>
+        <div>
+          <h4>Highly booked</h4>
+          {highDemand.length ? highDemand.map((period) => (
+            <div className="owner-opportunity-row" key={`high-${period.weekday}-${period.hour}`}>
+              <span>{formatPeriod(period)}</span>
+              <strong>{period.utilization >= 0.5 ? 'High demand' : 'Booked'}</strong>
+            </div>
+          )) : <p className="owner-empty-note">No highly booked periods in this range.</p>}
+        </div>
+      </div> : <p className="owner-empty-note">Booking opportunities will appear after booking activity is recorded.</p>}
     </section>
   );
 }
@@ -1354,11 +1444,13 @@ function OwnerBookings({ bookings, sports, search, sportFilter, onSearchChange, 
             <span>{booking.sport}</span>
             <span>{booking.teamSize || 1}</span>
             <strong>{currency(booking.price)}</strong>
-            <span className={`owner-status ${booking.paymentStatus === 'paid' ? 'active' : 'pending'}`}>{booking.paymentStatus === 'paid' ? 'Collected' : 'Unpaid'}</span>
-            <span className={`owner-status ${booking.cancelledAt ? 'cancelled' : 'active'}`}>{booking.cancelledAt ? 'Cancelled' : 'Active'}</span>
+            <span className={`owner-status ${booking.paymentStatus === 'paid' ? 'active' : booking.paymentStatus === 'refunded' ? 'cancelled' : 'pending'}`}>
+              {booking.paymentStatus === 'paid' ? 'Collected' : booking.paymentStatus === 'refunded' ? 'Refunded' : 'Unpaid'}
+            </span>
+            <span className={`owner-status ${booking.cancelledAt ? 'cancelled' : 'active'}`}>{booking.cancelledAt ? 'Cancelled' : 'Confirmed'}</span>
             <div className="owner-booking-actions">
               <button className="owner-action-button" type="button" onClick={() => onViewBooking(booking)} aria-label={`View ${booking.playerName}'s booking`}><Eye size={16} /></button>
-              {!booking.cancelledAt && booking.paymentStatus !== 'paid' && <button className="owner-action-button" type="button" onClick={() => onMarkPaid(booking.id)}>Collect</button>}
+              {!booking.cancelledAt && booking.paymentStatus !== 'paid' && booking.paymentStatus !== 'refunded' && <button className="owner-action-button" type="button" onClick={() => onMarkPaid(booking.id)}>Collect</button>}
               {!booking.cancelledAt && <button className="owner-action-button danger" type="button" onClick={() => onCancelBooking(booking.id)} aria-label={`Cancel ${booking.playerName}'s booking`}><Trash2 size={16} /></button>}
             </div>
           </article>
@@ -1371,7 +1463,15 @@ function OwnerBookings({ bookings, sports, search, sportFilter, onSearchChange, 
 function OwnerPricing({ settings, onManageSettings }) {
   return (
     <section className="owner-panel owner-settings-page">
-      <div><p className="owner-kicker">Current turf rate</p><h3>{currency(settings.price)} <span>/ slot</span></h3><p>Applies to a {settings.durationHours}-hour booking. Existing bookings retain their recorded price.</p></div>
+      <div>
+        <p className="owner-kicker">Current default price</p>
+        <h3>{currency(settings.price)} <span>/ slot</span></h3>
+        <p>Applies to a {settings.durationHours}-hour booking. Existing bookings retain their recorded price.</p>
+        <dl className="owner-settings-list owner-pricing-details">
+          <div><dt>Slot duration</dt><dd>{settings.durationHours} hours</dd></div>
+          <div><dt>Pricing status</dt><dd>Owner-managed fixed price</dd></div>
+        </dl>
+      </div>
       <button className="primary-button" type="button" onClick={onManageSettings}><IndianRupee size={17} />Manage price</button>
     </section>
   );
@@ -1403,6 +1503,7 @@ function OwnerProfile({ user, onEdit }) {
     ['Phone', user.phone],
     ['Business / turf', user.businessName || 'College turf'],
     ['Title', user.ownerTitle || 'Owner / administrator'],
+    ['Role', 'Owner / Admin'],
   ];
   return (
     <section className="owner-panel owner-settings-page">

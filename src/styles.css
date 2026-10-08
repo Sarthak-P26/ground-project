@@ -2395,6 +2395,14 @@ textarea:focus {
   gap: 12px;
 }
 
+.owner-primary-metrics {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.owner-secondary-metrics {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .owner-metric,
 .owner-panel {
   min-width: 0;
@@ -2528,6 +2536,68 @@ textarea:focus {
 .owner-preview-row small {
   color: var(--owner-muted);
   font-size: 0.78rem;
+}
+
+.owner-attention-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto auto auto;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 0;
+  border-top: 1px solid #edf1ee;
+}
+
+.owner-attention-student {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.owner-attention-student strong,
+.owner-attention-student span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.owner-attention-student strong,
+.owner-attention-price {
+  color: var(--owner-ink);
+}
+
+.owner-attention-student span {
+  color: var(--owner-muted);
+  font-size: 0.78rem;
+}
+
+.owner-opportunity-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 22px;
+}
+
+.owner-opportunity-grid h4 {
+  margin: 0 0 8px;
+  color: var(--owner-muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.owner-opportunity-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 0;
+  border-top: 1px solid #edf1ee;
+  color: var(--owner-ink);
+  font-size: 0.84rem;
+}
+
+.owner-opportunity-row strong {
+  color: var(--owner-green);
+  font-size: 0.78rem;
+  white-space: nowrap;
 }
 
 .owner-status {
@@ -2737,6 +2807,11 @@ textarea:focus {
   font-weight: 750;
 }
 
+.owner-pricing-details {
+  max-width: 600px;
+  margin-top: 18px;
+}
+
 .owner-chart-panel {
   min-height: 300px;
 }
@@ -2861,6 +2936,24 @@ textarea:focus {
 
   .owner-metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .owner-attention-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+  }
+
+  .owner-attention-student {
+    grid-column: 1 / -1;
+  }
+
+  .owner-attention-row .owner-booking-actions {
+    grid-column: 1 / -1;
+  }
+
+  .owner-opportunity-grid {
+    grid-template-columns: 1fr;
+    gap: 16px;
   }
 
   .owner-metric {
