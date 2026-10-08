@@ -10,6 +10,7 @@ import {
   Clock,
   CreditCard,
   Download,
+  Home,
   Dumbbell,
   Eye,
   Filter,
@@ -37,6 +38,7 @@ import {
   Users,
   X,
 } from 'lucide-react';
+import { LineChart, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import turfImage from './assets/four-section-turf.png';
 import './styles.css';
 
@@ -45,6 +47,11 @@ const STORAGE_KEYS = {
   settings: 'college-turf-settings-v1',
   user: 'college-turf-user-v1',
 };
+
+const rootElement = document.getElementById('root');
+if (!rootElement) throw new Error('Root element not found.');
+const appRoot = rootElement.__turfcastRoot || createRoot(rootElement);
+rootElement.__turfcastRoot = appRoot;
 
 const DEFAULT_SETTINGS = {
   price: 600,
@@ -138,17 +145,23 @@ function App() {
   const [settings, setSettings] = useState(() => loadJson(STORAGE_KEYS.settings, DEFAULT_SETTINGS));
   const [bookings, setBookings] = useState(() => loadJson(STORAGE_KEYS.bookings, []));
   const [currentUser, setCurrentUser] = useState(() => loadJson(STORAGE_KEYS.user, null));
-  const [authMode, setAuthMode] = useState('home');
+  const [authMode, setAuthMode] = useState(() => new URLSearchParams(window.location.search).get('reset') ? 'reset' : 'home');
+  const [demoResetLink, setDemoResetLink] = useState('');
   const [authError, setAuthError] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
   const [syncStatus, setSyncStatus] = useState('Connecting');
   const [activeDate, setActiveDate] = useState(() => toDateInput(new Date()));
   const [selectedSlot, setSelectedSlot] = useState(null);
+  const [weather, setWeather] = useState({});
+  const [forecast, setForecast] = useState([]);
+  const [priceSuggestions, setPriceSuggestions] = useState({});
+  const [acceptedSuggestions, setAcceptedSuggestions] = useState({});
   const [receiptBooking, setReceiptBooking] = useState(null);
   const [search, setSearch] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [showAdminUnlock, setShowAdminUnlock] = useState(false);
   const [isAdmin, setIsAdmin] = useState(() => sessionStorage.getItem('turf-admin') === 'yes');
+  const [dashboardMode, setDashboardMode] = useState(() => sessionStorage.getItem('turf-admin') === 'yes' ? 'admin' : 'student');
   const [sportFilter, setSportFilter] = useState('All');
 
   const slots = useMemo(() => makeTimeSlots(settings), [settings]);
@@ -159,7 +172,8 @@ function App() {
     date.setDate(date.getDate() + Number(settings.bookingWindowDays || DEFAULT_SETTINGS.bookingWindowDays));
     return toDateInput(date);
   }, [settings.bookingWindowDays]);
-  const selectedDateBookings = bookings
+  const activeBookings = bookings.filter((booking) => !booking.cancelledAt);
+  const selectedDateBookings = activeBookings
     .filter((booking) => booking.date === activeDate)
     .sort((a, b) => a.startHour - b.startHour || a.section.localeCompare(b.section));
 
@@ -180,12 +194,12 @@ function App() {
   const bookedCount = selectedDateBookings.length;
   const availableCount = Math.max(totalCapacity - bookedCount, 0);
   const revenue = selectedDateBookings.reduce((sum, booking) => sum + Number(booking.price), 0);
-  const nextBooking = bookings
+  const nextBooking = activeBookings
     .filter((booking) => isFutureOrToday(booking.date))
     .sort((a, b) => `${a.date}-${a.startHour}`.localeCompare(`${b.date}-${b.startHour}`))[0];
   const myBookings = currentUser
     ? bookings
-        .filter((booking) => booking.bookedBy === currentUser.id || booking.phone === currentUser.phone)
+        .filter((booking) => !booking.cancelledAt && (booking.bookedBy === currentUser.id || booking.phone === currentUser.phone))
         .sort((a, b) => `${a.date}-${a.startHour}`.localeCompare(`${b.date}-${b.startHour}`))
     : [];
   const myNextBooking = myBookings.find((booking) => isFutureOrToday(booking.date));
@@ -211,6 +225,14 @@ function App() {
     loadServerStore();
   }, []);
 
+  useEffect(() => {
+    Promise.all(slots.map(async (hour) => [hour, await fetch(`/api/weather-risk?date=${activeDate}&hour=${hour}`).then((r) => r.json())]))
+      .then((items) => setWeather(Object.fromEntries(items))).catch(() => setWeather({}));
+  }, [activeDate, slots.length]);
+
+  useEffect(() => { fetch('/api/forecast').then((r) => r.json()).then(setForecast).catch(() => setForecast([])); }, []);
+  useEffect(() => { fetch(`/api/price-suggestions?date=${activeDate}`).then((r) => r.json()).then(setPriceSuggestions).catch(() => setPriceSuggestions({})); }, [activeDate]);
+
   function persistBookings(nextBookings) {
     setBookings(nextBookings);
     saveJson(STORAGE_KEYS.bookings, nextBookings);
@@ -223,20 +245,23 @@ function App() {
   }
 
   async function addBooking(formData) {
+    const get = (key) => formData instanceof FormData ? formData.get(key) : formData[key];
+    const bookingSlot = selectedSlot;
     const nextBooking = {
       id: makeBookingId(),
       date: activeDate,
-      startHour: selectedSlot.hour,
-      endHour: selectedSlot.hour + settings.durationHours,
-      section: selectedSlot.section,
-      sport: formData.get('sport'),
-      playerName: formData.get('playerName').trim(),
-      phone: formData.get('phone').trim(),
-      collegeId: formData.get('collegeId').trim(),
+      startHour: bookingSlot.hour,
+      endHour: bookingSlot.hour + settings.durationHours,
+      section: bookingSlot.section,
+      sport: get('sport'),
+      playerName: String(get('playerName') || '').trim(),
+      phone: String(get('phone') || '').trim(),
+      collegeId: String(get('collegeId') || '').trim(),
       bookedBy: currentUser.id,
-      teamSize: Number(formData.get('teamSize')) || 1,
-      paymentMode: formData.get('paymentMode'),
-      notes: formData.get('notes').trim(),
+      teamSize: Number(get('teamSize')) || 1,
+      paymentMode: 'Pay at venue',
+      paymentStatus: 'unpaid',
+      notes: String(get('notes') || '').trim(),
       price: Number(settings.price),
       createdAt: new Date().toISOString(),
     };
@@ -253,13 +278,13 @@ function App() {
       return { ok: false, message: 'This date is blocked for maintenance.' };
     }
 
-    const activeForPhone = bookings.filter((booking) => booking.phone === nextBooking.phone && isFutureOrToday(booking.date));
+    const activeForPhone = activeBookings.filter((booking) => booking.phone === nextBooking.phone && isFutureOrToday(booking.date));
     if (activeForPhone.length >= Number(settings.maxActiveBookingsPerPhone)) {
       return { ok: false, message: `This phone already has ${settings.maxActiveBookingsPerPhone} active bookings.` };
     }
 
-    const alreadyBooked = bookings.some((booking) =>
-      bookingMatchesSlot(booking, activeDate, selectedSlot.section, selectedSlot.hour),
+    const alreadyBooked = activeBookings.some((booking) =>
+      bookingMatchesSlot(booking, activeDate, bookingSlot.section, bookingSlot.hour),
     );
 
     if (alreadyBooked) {
@@ -280,6 +305,7 @@ function App() {
       const store = await response.json();
       persistBookings(store.bookings);
       persistSettings(store.settings);
+      setReceiptBooking(store.bookings.find((booking) => booking.id === nextBooking.id) || nextBooking);
       setSyncStatus('Live');
     } catch {
       persistBookings([...bookings, nextBooking]);
@@ -294,6 +320,7 @@ function App() {
     if (pin === String(settings.adminPin || '1234')) {
       sessionStorage.setItem('turf-admin', 'yes');
       setIsAdmin(true);
+      setDashboardMode('admin');
       setShowAdminUnlock(false);
       return true;
     }
@@ -364,6 +391,14 @@ function App() {
         setAuthError(result.message || 'Authentication failed.');
         return false;
       }
+      if (mode === 'forgot-password') {
+        const token = result.resetToken || new URL(result.resetLink || '', window.location.origin).searchParams.get('reset');
+        const nextResetLink = token ? `${window.location.origin}/?reset=${token}` : '';
+        setDemoResetLink(nextResetLink);
+        setAuthError(result.message || 'If an account exists, a reset link will be prepared in demo mode.');
+        return true;
+      }
+      if (mode === 'reset-password') { setAuthMode('login'); setAuthError(result.message || 'Password reset complete.'); return true; }
       applyAuthenticatedSession(result.user, result.store);
       setSyncStatus('Live');
       return true;
@@ -381,6 +416,7 @@ function App() {
     sessionStorage.removeItem('turf-admin');
     setCurrentUser(null);
     setIsAdmin(false);
+    setDashboardMode('student');
     setAuthMode('home');
   }
 
@@ -430,6 +466,7 @@ function App() {
           setAuthError('');
         }}
         onSubmit={handleAuthSubmit}
+        demoResetLink={demoResetLink}
       />
     );
   }
@@ -443,7 +480,7 @@ function App() {
           </div>
           <div>
             <p>College Sports Desk</p>
-            <h1>Turf Booking</h1>
+            <h1>TurfCast</h1>
           </div>
         </div>
         <div className="top-actions">
@@ -455,6 +492,10 @@ function App() {
             <Download size={18} />
             <span>Export</span>
           </button>
+          <button className="ghost-button" type="button" onClick={() => isAdmin ? setDashboardMode(dashboardMode === 'admin' ? 'student' : 'admin') : setShowAdminUnlock(true)}>
+            <ShieldCheck size={18} /><span>{dashboardMode === 'admin' ? 'Student View' : 'Owner Console'}</span>
+          </button>
+          <button className="ghost-button" type="button" onClick={logout} title="Back to public home"><Home size={18} /><span>Home</span></button>
           <span className={`sync-pill ${syncStatus.toLowerCase()}`}>{syncStatus}</span>
           <button className="icon-button" type="button" onClick={() => requireAdmin(() => setShowSettings(true))} title="Admin settings">
             {isAdmin ? <Settings size={20} /> : <Lock size={20} />}
@@ -512,7 +553,19 @@ function App() {
         </div>
       </section>
 
-      <section className="command-hero product-hero">
+      <section className="simple-welcome">
+        <div><p>{dashboardMode === 'admin' ? 'Owner Console' : 'Student Booking'}</p><h2>{dashboardMode === 'admin' ? 'Control today’s turf, at a glance.' : `Hi ${currentUser.name.split(' ')[0]}, choose a time that works.`}</h2><span>{dashboardMode === 'admin' ? 'Live operations, collections, and AI demand guidance in one place.' : 'Pick a date, check the rain signal, and reserve an open section.'}</span></div>
+        <button className="primary-button" type="button" onClick={() => scrollToSection(dashboardMode === 'admin' ? 'records' : 'schedule')}><CalendarDays size={18} /><span>{dashboardMode === 'admin' ? 'View Bookings' : 'Book a Slot'}</span></button>
+      </section>
+
+      {dashboardMode === 'admin' && <section className="forecast-card">
+        <div><p>AI Demand Signal</p><h2>7-Day Demand Forecast</h2></div>
+        <ResponsiveContainer width="100%" height={180}><LineChart data={forecast}><XAxis dataKey="label" /><YAxis /><Tooltip /><Line type="monotone" dataKey="demand" stroke="#1a73e8" strokeWidth={3} dot={{ r: 4 }} /></LineChart></ResponsiveContainer>
+      </section>}
+
+      {dashboardMode === 'admin' && <OwnerDashboard bookings={activeBookings} onMarkPaid={async (id) => { const response = await fetch(`/api/bookings/${id}/payment`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paymentStatus: 'paid' }) }); if (response.ok) { const store = await response.json(); persistBookings(store.bookings); } }} />}
+
+      {false && <section className="command-hero product-hero">
         <div className="hero-copy">
           <p>Four-section campus turf</p>
           <h2>Book a clean three-hour window before the rush starts.</h2>
@@ -541,7 +594,7 @@ function App() {
             })}
           </div>
         </div>
-      </section>
+      </section>}
 
       <section className="summary-strip">
         <Metric icon={<LayoutGrid size={20} />} label="Sections" value={settings.sections.length} tone="green" />
@@ -552,7 +605,7 @@ function App() {
 
       <section className="date-runway" aria-label="Quick date selection">
         {quickDates.map((date, index) => {
-          const count = bookings.filter((booking) => booking.date === date).length;
+          const count = activeBookings.filter((booking) => booking.date === date).length;
           const dayCapacity = totalCapacity;
           return (
             <button
@@ -603,6 +656,8 @@ function App() {
               {settings.sections.map((section) => {
                 const count = selectedDateBookings.filter((booking) => booking.section === section).length;
                 const percent = slots.length ? Math.round((count / slots.length) * 100) : 0;
+                const suggestion = priceSuggestions[section];
+                const suggested = suggestion?.suggestedPrice ?? settings.price;
                 return (
                   <div className="load-row" key={section}>
                     <div>
@@ -612,6 +667,8 @@ function App() {
                     <div className="load-bar">
                       <span style={{ width: `${percent}%` }} />
                     </div>
+                    <small>Base {currency(settings.price)} · Suggested {currency(suggested)} {suggestion ? `(${suggestion.demand}% ${suggestion.recommendation.toLowerCase()})` : ''}</small>
+                    {isAdmin && suggested !== settings.price && <button className="text-button" type="button" onClick={() => setAcceptedSuggestions((current) => ({ ...current, [section]: suggested }))}>{acceptedSuggestions[section] ? 'Suggestion accepted for review' : 'Accept suggestion'}</button>}
                   </div>
                 );
               })}
@@ -671,7 +728,7 @@ function App() {
                   <span>{formatHour(hour + settings.durationHours)}</span>
                 </div>
                 {settings.sections.map((section) => {
-                  const booking = bookings.find((item) => bookingMatchesSlot(item, activeDate, section, hour));
+                  const booking = activeBookings.find((item) => bookingMatchesSlot(item, activeDate, section, hour));
                   return (
                     <button
                       type="button"
@@ -686,12 +743,14 @@ function App() {
                           <span>{booking.sport}</span>
                           <strong>{booking.playerName}</strong>
                           <small>{booking.phone}</small>
+                          <small className={`weather-tag ${(weather[hour]?.risk || 'Low').toLowerCase()}`}>{weather[hour]?.risk || 'Low'} rain risk</small>
                         </>
                       ) : (
                         <>
                           <Plus size={18} />
                           <strong>Available</strong>
                           <small>{currency(settings.price)}</small>
+                          <small className={`weather-tag ${(weather[hour]?.risk || 'Low').toLowerCase()}`}>{weather[hour]?.risk || 'Low'} rain risk</small>
                         </>
                       )}
                     </button>
@@ -752,12 +811,14 @@ function App() {
                   <span>{booking.sport}</span>
                   <span>{booking.teamSize} players</span>
                   <span>{booking.paymentMode || 'Pending'}</span>
+                  <span>{booking.paymentStatus || 'unpaid'}</span>
+                  {booking.cancelledAt && <span>Cancelled</span>}
                   <span>{currency(booking.price)}</span>
                 </div>
                 <button className="icon-button" type="button" onClick={() => setReceiptBooking(booking)} title="View receipt">
                   <Eye size={18} />
                 </button>
-                <button className="danger-button" type="button" onClick={() => requireAdmin(() => cancelBooking(booking.id))} title="Cancel booking">
+                <button className="danger-button" type="button" disabled={Boolean(booking.cancelledAt)} onClick={() => requireAdmin(() => cancelBooking(booking.id))} title={booking.cancelledAt ? 'Already cancelled' : 'Cancel booking'}>
                   <Trash2 size={18} />
                 </button>
               </article>
@@ -801,11 +862,12 @@ function App() {
           onClose={() => setReceiptBooking(null)}
         />
       )}
+
     </main>
   );
 }
 
-function AuthExperience({ authMode, authError, authLoading, settings, bookings, onModeChange, onSubmit }) {
+function AuthExperience({ authMode, authError, authLoading, settings, bookings, onModeChange, onSubmit, demoResetLink }) {
   const today = toDateInput(new Date());
   const todayBookings = bookings.filter((booking) => booking.date === today).length;
   const slots = makeTimeSlots(settings).length * settings.sections.length;
@@ -822,7 +884,7 @@ function AuthExperience({ authMode, authError, authLoading, settings, bookings, 
           </div>
           <div>
             <p>College Sports Desk</p>
-            <h1>Turf Booking</h1>
+            <h1>TurfCast</h1>
           </div>
         </div>
         <div className="auth-nav-actions">
@@ -887,6 +949,7 @@ function AuthExperience({ authMode, authError, authLoading, settings, bookings, 
           authLoading={authLoading}
           onModeChange={onModeChange}
           onSubmit={onSubmit}
+          demoResetLink={demoResetLink}
         />
       </section>
       <section className="auth-product-band">
@@ -958,14 +1021,18 @@ function AuthStat({ label, value }) {
   );
 }
 
-function AuthPanel({ mode, authError, authLoading, onModeChange, onSubmit }) {
+function AuthPanel({ mode, authError, authLoading, onModeChange, onSubmit, demoResetLink }) {
   const isSignup = mode === 'signup';
+  const panelTitle = mode === 'forgot' ? 'Reset your TurfCast password' : mode === 'reset' ? 'Choose a new password' : isSignup ? 'Create your TurfCast account' : 'Login to book your slot';
+  const panelKicker = mode === 'forgot' ? 'Account Recovery' : mode === 'reset' ? 'Secure Reset' : isSignup ? 'New Player' : 'Welcome Back';
 
   async function handleSubmit(event) {
     event.preventDefault();
     const formData = new FormData(event.currentTarget);
     const payload = Object.fromEntries(formData.entries());
-    await onSubmit(isSignup ? 'signup' : 'login', payload);
+    if (mode === 'forgot') await onSubmit('forgot-password', payload);
+    else if (mode === 'reset') await onSubmit('reset-password', { ...payload, token: new URLSearchParams(window.location.search).get('reset') });
+    else await onSubmit(isSignup ? 'signup' : 'login', payload);
   }
 
   return (
@@ -975,12 +1042,12 @@ function AuthPanel({ mode, authError, authLoading, onModeChange, onSubmit }) {
           {isSignup ? <UserPlus size={22} /> : <LogIn size={22} />}
         </div>
         <div>
-          <p>{isSignup ? 'New Player' : 'Welcome Back'}</p>
-          <h3>{isSignup ? 'Create your turf account' : 'Login to book your slot'}</h3>
+          <p>{panelKicker}</p>
+          <h3>{panelTitle}</h3>
         </div>
       </div>
 
-      {isSignup ? (
+      {mode === 'forgot' ? <><label>Email or Phone<div className="input-with-icon"><Mail size={18} /><input name="identifier" type="text" placeholder="email or phone" /></div></label>{demoResetLink ? <p className="demo-link">Demo mode: in production this would be emailed. <a href={demoResetLink}>Open reset link</a></p> : <p className="demo-link">If an account exists, a reset link will be prepared in demo mode.</p>}</> : mode === 'reset' ? <label>New Password<div className="input-with-icon"><Lock size={18} /><input name="password" type="password" placeholder="At least 6 characters" /></div></label> : isSignup ? (
         <>
           <label>
             Full Name
@@ -1021,19 +1088,19 @@ function AuthPanel({ mode, authError, authLoading, onModeChange, onSubmit }) {
         </label>
       )}
 
-      <label>
+      {mode !== 'forgot' && mode !== 'reset' && <label>
         Password
         <div className="input-with-icon">
           <Lock size={18} />
           <input name="password" type="password" placeholder="At least 6 characters" />
         </div>
-      </label>
+      </label>}
 
       {authError && <p className="form-error">{authError}</p>}
 
       <button className="primary-button glow-button auth-submit" type="submit" disabled={authLoading}>
         {isSignup ? <UserPlus size={18} /> : <LogIn size={18} />}
-        <span>{authLoading ? 'Working' : isSignup ? 'Create Account' : 'Login'}</span>
+        <span>{authLoading ? 'Working' : mode === 'forgot' ? 'Create reset link' : mode === 'reset' ? 'Set new password' : isSignup ? 'Create Account' : 'Login'}</span>
       </button>
 
       <p className="auth-switch">
@@ -1042,6 +1109,7 @@ function AuthPanel({ mode, authError, authLoading, onModeChange, onSubmit }) {
           {isSignup ? 'Login' : 'Sign up'}
         </button>
       </p>
+      {mode === 'login' && <button className="text-button" type="button" onClick={() => onModeChange('forgot')}>Forgot Password?</button>}
     </form>
   );
 }
@@ -1062,6 +1130,20 @@ function SmallStat({ label, value }) {
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
+  );
+}
+
+function OwnerDashboard({ bookings, onMarkPaid }) {
+  const today = toDateInput(new Date());
+  const todayBookings = bookings.filter((booking) => booking.date === today);
+  const unpaid = bookings.filter((booking) => booking.paymentStatus === 'unpaid');
+  const expected = todayBookings.reduce((total, booking) => total + Number(booking.price || 0), 0);
+  return (
+    <section className="owner-dashboard">
+      <div className="owner-heading"><div><p>Owner essentials</p><h2>Today’s control board</h2></div><span>Only the actions that need your attention.</span></div>
+      <div className="owner-metrics"><SmallStat label="Today’s bookings" value={todayBookings.length} /><SmallStat label="Expected collection" value={currency(expected)} /><SmallStat label="Payment at venue" value={unpaid.length} /></div>
+      <div className="collection-list"><div><h3>Collect at venue</h3><p>Mark cash collection after the team arrives.</p></div>{unpaid.length ? unpaid.slice(0, 4).map((booking) => <div className="collection-row" key={booking.id}><span><strong>{booking.playerName}</strong><small>{booking.section} · {formatDate(booking.date)}</small></span><button className="ghost-button" type="button" onClick={() => onMarkPaid(booking.id)}>Mark collected</button></div>) : <p className="quiet-text">No collections waiting.</p>}</div>
+    </section>
   );
 }
 
@@ -1125,15 +1207,6 @@ function BookingModal({ settings, selectedSlot, activeDate, currentUser, onClose
           <label>
             Players
             <input name="teamSize" type="number" min="1" max="30" defaultValue="10" />
-          </label>
-          <label>
-            Payment
-            <select name="paymentMode" defaultValue="Pending">
-              <option>Pending</option>
-              <option>Cash</option>
-              <option>UPI</option>
-              <option>College Account</option>
-            </select>
           </label>
         </div>
 
@@ -1328,7 +1401,7 @@ function ReceiptModal({ booking, onClose }) {
               <ClipboardCheck size={24} />
             </div>
             <div>
-              <p>College Turf Booking</p>
+              <p>TurfCast · College Sports Desk</p>
               <h3>{booking.playerName}</h3>
             </div>
           </div>
@@ -1368,4 +1441,4 @@ function ReceiptItem({ label, value }) {
   );
 }
 
-createRoot(document.getElementById('root')).render(<App />);
+appRoot.render(<App />);
