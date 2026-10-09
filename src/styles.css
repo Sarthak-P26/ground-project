@@ -3059,6 +3059,67 @@ textarea:focus {
   color: var(--owner-ink);
 }
 
+.owner-ai-recommendations .owner-panel-heading {
+  align-items: center;
+}
+
+.owner-ai-recommendations .owner-panel-heading .primary-button {
+  flex: 0 0 auto;
+  min-height: 38px;
+  padding: 8px 12px;
+  font-size: 0.8rem;
+}
+
+.owner-ai-note {
+  margin: -2px 0 12px;
+  color: var(--owner-muted);
+  font-size: 0.75rem;
+}
+
+.owner-ai-error {
+  margin: 0;
+  color: #a23c35;
+  font-size: 0.84rem;
+}
+
+.owner-ai-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: 10px;
+}
+
+.owner-ai-item {
+  padding: 13px;
+  border: 1px solid var(--owner-line);
+  border-radius: 12px;
+  background: #fbfcfb;
+}
+
+.owner-ai-item h4 {
+  margin: 0 0 6px;
+  color: var(--owner-ink);
+  font-size: 0.9rem;
+}
+
+.owner-ai-item p {
+  margin: 0 0 9px;
+  color: var(--owner-muted);
+  font-size: 0.79rem;
+  line-height: 1.45;
+}
+
+.owner-ai-item strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--owner-green);
+  font-size: 0.74rem;
+}
+
+.owner-ai-item p:last-child {
+  margin-bottom: 0;
+  color: var(--owner-ink);
+}
+
 @media (max-width: 1000px) {
   .owner-metric-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -3075,6 +3136,15 @@ textarea:focus {
 }
 
 @media (max-width: 680px) {
+  .owner-ai-recommendations .owner-panel-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .owner-ai-recommendations .owner-panel-heading .primary-button {
+    align-self: start;
+  }
+
   .owner-navigation {
     position: static;
     width: 100%;

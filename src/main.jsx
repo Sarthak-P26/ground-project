@@ -1334,6 +1334,9 @@ function OwnerExperience({
 }
 
 function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCancelBooking, onViewBooking }) {
+  const [aiRecommendations, setAiRecommendations] = useState([]);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState('');
   const today = toDateInput(new Date());
   const todayDate = new Date(`${today}T00:00:00`);
   const weekStart = new Date(todayDate);
@@ -1403,6 +1406,24 @@ function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCanc
     return `${dayLabel} ${formatHour(hour)}–${formatHour(hour + settings.durationHours)}`;
   };
 
+  async function getAiRecommendations() {
+    setAiLoading(true);
+    setAiError('');
+    try {
+      const response = await fetch('/api/ai/owner-recommendations', { headers: authHeaders() });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.message || 'Could not load AI recommendations.');
+      if (!Array.isArray(result.recommendations) || result.recommendations.length < 3) {
+        throw new Error('AI recommendations could not be displayed. Please try again.');
+      }
+      setAiRecommendations(result.recommendations);
+    } catch (error) {
+      setAiError(error.message || 'AI recommendations are temporarily unavailable.');
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
   return (
     <div className="owner-page-content">
       <section className="owner-metric-grid owner-primary-metrics" aria-label="Key turf metrics">
@@ -1437,6 +1458,32 @@ function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCanc
         highDemand={highDemand}
         formatPeriod={formatOpportunity}
       />
+      <section className="owner-panel owner-ai-recommendations" aria-labelledby="owner-ai-recommendations-title">
+        <div className="owner-panel-heading">
+          <div>
+            <h3 id="owner-ai-recommendations-title">AI Business Recommendations</h3>
+            <p>Practical ideas based on your turf booking data.</p>
+          </div>
+          <button className="primary-button" type="button" onClick={getAiRecommendations} disabled={aiLoading}>
+            <Sparkles size={16} />
+            {aiLoading ? 'Analyzing...' : 'Get AI Recommendations'}
+          </button>
+        </div>
+        <p className="owner-ai-note">AI suggestions are advisory. You stay in control.</p>
+        {aiError && <p className="owner-ai-error" role="alert">{aiError}</p>}
+        {aiRecommendations.length > 0 && (
+          <div className="owner-ai-list" aria-live="polite">
+            {aiRecommendations.map((recommendation, index) => (
+              <article className="owner-ai-item" key={`${recommendation.title}-${index}`}>
+                <h4>{recommendation.title}</h4>
+                <p>{recommendation.reason}</p>
+                <strong>Recommended action</strong>
+                <p>{recommendation.action}</p>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
       <button className="owner-inline-link" type="button" onClick={onOpenBookings}>Open booking management <ArrowRight size={16} /></button>
     </div>
   );

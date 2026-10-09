@@ -258,6 +258,145 @@ app.get('/api/store', route(async (req, res) => {
   const store = await readStore();
   res.json(publicStoreForUser(store, authenticatedUser(store, req)));
 }));
+app.get('/api/ai/owner-recommendations', route(async (req, res) => {
+  const store = await readStore();
+  if (authenticatedUser(store, req)?.role !== 'owner') {
+    return res.status(403).json({ message: 'Owner access is required to view AI recommendations.' });
+  }
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ message: 'AI recommendations are not configured yet. Set GEMINI_API_KEY on the server.' });
+  }
+
+  const currentDate = today();
+  const activeBookings = store.bookings.filter((booking) => !booking.cancelledAt);
+  const upcomingBookings = activeBookings.filter((booking) =>
+    booking.date > currentDate ||
+    (booking.date === currentDate && bookingStartTimestamp(booking.date, booking.startHour) >= Date.now()),
+  );
+  const historyStart = new Date(`${currentDate}T00:00:00.000Z`);
+  historyStart.setUTCDate(historyStart.getUTCDate() - 27);
+  const historyStartDate = historyStart.toISOString().slice(0, 10);
+  const recentBookings = activeBookings.filter((booking) =>
+    booking.date >= historyStartDate && booking.date <= currentDate,
+  );
+  const countBy = (items, keyFn, field = 'name') => {
+    const counts = new Map();
+    for (const item of items) {
+      const key = keyFn(item);
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    return [...counts.entries()].map(([key, count]) => ({ [field]: key, bookings: count }));
+  };
+  const slotHours = slots(store.settings);
+  const periodUsage = slotHours.map((hour) => {
+    const matching = recentBookings.filter((booking) => Number(booking.startHour) === hour).length;
+    const capacity = 28 * store.settings.sections.length;
+    return {
+      startTime: `${String(hour).padStart(2, '0')}:00`,
+      bookings: matching,
+      capacity,
+      utilizationPercent: capacity ? Math.round((matching / capacity) * 100) : 0,
+    };
+  });
+  const orderedPeriods = [...periodUsage].sort((a, b) => a.utilizationPercent - b.utilizationPercent);
+  const activeOverrides = store.priceOverrides.filter((override) =>
+    override.active && override.date >= currentDate && override.date <= (() => {
+      const lastDate = new Date(`${currentDate}T00:00:00.000Z`);
+      lastDate.setUTCDate(lastDate.getUTCDate() + Number(store.settings.bookingWindowDays));
+      return lastDate.toISOString().slice(0, 10);
+    })(),
+  );
+  const businessContext = {
+    asOfDate: currentDate,
+    bookingsToday: activeBookings.filter((booking) => booking.date === currentDate).length,
+    upcomingBookingsCount: upcomingBookings.length,
+    upcomingByDate: countBy(upcomingBookings, (booking) => booking.date, 'date').sort((a, b) => a.date.localeCompare(b.date)).slice(0, 14),
+    recentPeriodDays: 28,
+    recentBookingVolume: recentBookings.length,
+    recentBookingsBySport: countBy(recentBookings, (booking) => booking.sport, 'sport'),
+    recentBookingsBySection: countBy(recentBookings, (booking) => booking.section, 'section'),
+    recentBookingsByTimeSlot: countBy(recentBookings, (booking) => Number(booking.startHour), 'hour').map((item) => ({
+      startTime: `${String(item.hour).padStart(2, '0')}:00`,
+      bookings: item.bookings,
+    })),
+    lowUtilizationPeriods: orderedPeriods.slice(0, 2),
+    highUtilizationPeriods: [...periodUsage].sort((a, b) => b.utilizationPercent - a.utilizationPercent).slice(0, 2),
+    defaultPriceINR: store.settings.price,
+    activeCustomPrices: activeOverrides.length,
+    activeCustomPriceExamples: activeOverrides.slice(0, 10).map((override) => ({
+      date: override.date,
+      section: override.section,
+      startTime: `${String(override.startHour).padStart(2, '0')}:00`,
+      priceINR: override.price,
+      type: override.type,
+    })),
+    bookingWindowDays: store.settings.bookingWindowDays,
+    sectionCount: store.settings.sections.length,
+    slotsPerDay: slotHours.length,
+    totalDailySlotCapacity: slotHours.length * store.settings.sections.length,
+  };
+  const prompt = [
+    'You are a practical business analyst for a single college turf booking business.',
+    'Use only the supplied TurfCast business data. Do not invent bookings, prices, weather, or other facts.',
+    'Give 3 to 5 concise, actionable recommendations focused on increasing bookings and utilization.',
+    'Pricing suggestions are optional recommendations only; never imply that you changed or will automatically change a price.',
+    'Do not recommend weather-based pricing. Do not invent causes when the data does not establish them.',
+    'Return only JSON in this exact shape: {"recommendations":[{"title":"...","reason":"...","action":"..."}]}.',
+    'Keep each title brief and each reason/action to one or two short sentences.',
+    `TurfCast data: ${JSON.stringify(businessContext)}`,
+  ].join('\n');
+  const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  let geminiResponse;
+  try {
+    geminiResponse = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          generationConfig: { responseMimeType: 'application/json', temperature: 0.3 },
+        }),
+        signal: AbortSignal.timeout(20000),
+      },
+    );
+  } catch {
+    return res.status(502).json({ message: 'AI recommendations are temporarily unavailable. Please try again shortly.' });
+  }
+  if (!geminiResponse.ok) {
+    return res.status(502).json({ message: 'AI recommendations are temporarily unavailable. Please try again shortly.' });
+  }
+
+  let generated;
+  try {
+    const result = await geminiResponse.json();
+    const text = result.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('').trim();
+    generated = JSON.parse(text || '');
+  } catch {
+    return res.status(502).json({ message: 'AI recommendations could not be read. Please try again shortly.' });
+  }
+  const recommendations = Array.isArray(generated?.recommendations)
+    ? generated.recommendations
+        .filter((item) =>
+          item &&
+          typeof item.title === 'string' &&
+          typeof item.reason === 'string' &&
+          typeof item.action === 'string',
+        )
+        .slice(0, 5)
+        .map((item) => ({
+          title: item.title.trim().slice(0, 100),
+          reason: item.reason.trim().slice(0, 300),
+          action: item.action.trim().slice(0, 300),
+        }))
+        .filter((item) => item.title && item.reason && item.action)
+    : [];
+  if (recommendations.length < 3) {
+    return res.status(502).json({ message: 'AI recommendations could not be generated. Please try again shortly.' });
+  }
+  res.json({ recommendations });
+}));
 app.get('/api/weather-risk', route(async (req, res) => res.json(await weatherRisk(String(req.query.date || today()), Number(req.query.hour || 18)))));
 app.get('/api/forecast', route(async (req, res) => {
   const store = await readStore();
