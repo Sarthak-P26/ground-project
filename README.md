@@ -65,6 +65,20 @@ commit `.env`. `APP_BASE_URL` should be the public URL users visit; it defaults 
 credentials are configured, password recovery will report that email is unavailable
 instead of implying that a message was sent.
 
+### Weather data
+
+Set the turf city and state in Owner Settings to enable weather lookups. The backend
+resolves that saved location with Open-Meteo Geocoding and uses Open-Meteo Forecast for
+modelled current conditions, daily high/low temperatures, and hourly forecasts. No
+weather API key is required. Resolved locations and successful forecasts are cached
+in `data/weather-cache.json`; forecasts are refreshed after 15 minutes, with a
+successful cache usable as stale data for up to three hours during provider outages.
+The normalized response is available at `GET /api/weather?date=YYYY-MM-DD&hour=18`;
+the existing `/api/weather-risk` and owner `/api/forecast` routes remain available.
+IMD's documented JSON endpoints required credentials (HTTP 401 during verification),
+so official IMD warnings are reported as unavailable rather than guessed. Weather
+data does not change prices or bookings.
+
 ## Change Rules
 
 Owners can use Turf Settings to change the base fee, slot duration, timings, sports,

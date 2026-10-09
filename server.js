@@ -37,6 +37,16 @@ app.use(express.json());
 const list = (v) => Array.isArray(v) ? v : Object.values(v || {});
 const MAX_PRICE_INR = 100000;
 const isValidPrice = (value) => typeof value === 'number' && Number.isSafeInteger(value) && value > 0 && value <= MAX_PRICE_INR;
+function indiaToday() {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
 function normalizePriceOverrides(overrides, settings) {
   const activeOverrides = new Map();
   const normalized = list(overrides || []).flatMap((override) => {
@@ -135,75 +145,431 @@ async function readStore() {
     users: [...mergedUsers.values()],
   }, fileStore[rolesNeedMigration] || firebaseUsers.some((user) => !['student', 'owner'].includes(user.role)));
 }
-function unavailableWeather(status, message) {
-  return { available: false, status, message };
-}
-async function weatherRisk(date, hour, location) {
-  const apiKey = process.env.OPENWEATHER_API_KEY;
-  if (!apiKey) return unavailableWeather('not_configured', 'Live weather is unavailable because the server weather provider is not configured.');
-  if (typeof location !== 'string' || !location.trim()) {
-    return unavailableWeather('location_missing', 'Add the turf city or location in Turf Settings to include live weather.');
+const WEATHER_PROVIDER = 'Open-Meteo';
+const WEATHER_CACHE_FILE = path.join(__dirname, 'data', 'weather-cache.json');
+const WEATHER_FRESH_MS = 15 * 60 * 1000;
+const WEATHER_STALE_MS = 3 * 60 * 60 * 1000;
+const LOCATION_CACHE_MS = 30 * 24 * 60 * 60 * 1000;
+const weatherCache = { locations: {}, forecasts: {} };
+let weatherCacheLoaded;
+let weatherCacheWriteQueue = Promise.resolve();
+
+class WeatherProviderError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
   }
+}
+
+function unavailableWeather(status, message, details = {}) {
+  return {
+    available: false,
+    status,
+    message,
+    provider: WEATHER_PROVIDER,
+    retrievedAt: null,
+    servedAt: new Date().toISOString(),
+    freshness: 'unavailable',
+    cached: false,
+    ...details,
+  };
+}
+
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function finiteNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function loadWeatherCache() {
+  if (!weatherCacheLoaded) {
+    weatherCacheLoaded = fs.readFile(WEATHER_CACHE_FILE, 'utf8')
+      .then((text) => {
+        const saved = JSON.parse(text);
+        if (saved?.version === 1 && isRecord(saved.locations) && isRecord(saved.forecasts)) {
+          Object.assign(weatherCache, saved);
+        }
+      })
+      .catch((error) => {
+        if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) {
+          console.warn('[Weather cache]', JSON.stringify({ status: 'read_failed', message: error.message }));
+        } else if (error instanceof SyntaxError) {
+          console.warn('[Weather cache]', JSON.stringify({ status: 'invalid_cache_file' }));
+        }
+      });
+  }
+  return weatherCacheLoaded;
+}
+
+function persistWeatherCache() {
+  weatherCacheWriteQueue = weatherCacheWriteQueue
+    .catch(() => {})
+    .then(async () => {
+      const temporaryPath = `${WEATHER_CACHE_FILE}.${process.pid}.${crypto.randomUUID()}.tmp`;
+      try {
+        await fs.mkdir(path.dirname(WEATHER_CACHE_FILE), { recursive: true });
+        await fs.writeFile(temporaryPath, `${JSON.stringify({ version: 1, ...weatherCache })}\n`, 'utf8');
+        await fs.rename(temporaryPath, WEATHER_CACHE_FILE);
+      } catch (error) {
+        await fs.rm(temporaryPath, { force: true }).catch(() => {});
+        console.warn('[Weather cache]', JSON.stringify({ status: 'write_failed', message: error.message }));
+      }
+    });
+  return weatherCacheWriteQueue;
+}
+
+async function fetchWeatherJson(url, provider) {
+  let response;
   try {
-    const url = new URL('https://api.openweathermap.org/data/2.5/forecast');
-    url.searchParams.set('q', location.trim());
-    url.searchParams.set('appid', apiKey);
-    url.searchParams.set('units', 'metric');
-    const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    let data = {};
-    try {
-      data = await response.json();
-    } catch {
-      data = {};
-    }
-    if (!response.ok) {
-      const status = response.status === 401 || response.status === 403
-        ? 'provider_credentials'
-        : response.status === 404
-          ? 'location_not_found'
-          : response.status === 429
-            ? 'provider_limit'
-            : 'provider_error';
-      const message = status === 'provider_credentials'
-        ? 'Live weather is unavailable because the weather provider rejected its server credentials.'
-        : status === 'location_not_found'
-          ? 'Live weather is unavailable because the saved turf location was not found.'
-          : status === 'provider_limit'
-            ? 'Live weather is temporarily unavailable because the weather provider is rate-limiting requests.'
-            : 'Live weather is temporarily unavailable from the weather provider.';
-      console.warn('[Weather advisor]', JSON.stringify({ status, httpStatus: response.status }));
-      return unavailableWeather(status, message);
-    }
-    const timezoneOffset = Number(data.city?.timezone);
-    if (!Number.isFinite(timezoneOffset) || !Array.isArray(data.list)) {
-      return unavailableWeather('forecast_unavailable', 'The weather provider did not return a usable forecast for this location.');
-    }
-    const [year, month, day] = date.split('-').map(Number);
-    const target = Date.UTC(year, month - 1, day, Number(hour)) - timezoneOffset * 1000;
-    const item = data.list
-      .filter((entry) => Number.isFinite(Number(entry.dt)))
-      .sort((a, b) => Math.abs(Number(a.dt) * 1000 - target) - Math.abs(Number(b.dt) * 1000 - target))[0];
-    if (!item || Math.abs(Number(item.dt) * 1000 - target) > 90 * 60 * 1000 || !Number.isFinite(Number(item.pop))) {
-      return unavailableWeather('forecast_unavailable', 'The weather provider has no forecast for this location and selected time.');
-    }
-    const probability = Math.max(0, Math.min(100, Math.round(Number(item.pop) * 100)));
-    return {
-      available: true,
-      status: 'available',
-      probability,
-      risk: probability >= 65 ? 'High' : probability >= 35 ? 'Medium' : 'Low',
-      source: 'OpenWeatherMap',
-    };
+    response = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(8000) });
   } catch (error) {
-    const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError';
-    console.warn('[Weather advisor]', JSON.stringify({ status: timedOut ? 'timeout' : 'network_error' }));
-    return unavailableWeather(
-      timedOut ? 'timeout' : 'network_error',
-      timedOut
-        ? 'Live weather took too long to load and was not included.'
-        : 'Live weather could not be reached and was not included.',
+    throw new WeatherProviderError(
+      error?.name === 'TimeoutError' || error?.name === 'AbortError' ? 'timeout' : 'provider_unavailable',
+      error?.name === 'TimeoutError' || error?.name === 'AbortError'
+        ? `${provider} did not respond before the weather request timed out.`
+        : `${provider} could not be reached.`,
     );
   }
+  if (!response.ok) {
+    throw new WeatherProviderError('provider_unavailable', `${provider} returned HTTP ${response.status}.`);
+  }
+  try {
+    return await response.json();
+  } catch {
+    throw new WeatherProviderError('invalid_provider_response', `${provider} returned invalid JSON.`);
+  }
+}
+
+function normalizeLocationQuery(location) {
+  return location.trim().replace(/\s+/g, ' ').toLocaleLowerCase('en');
+}
+
+function normalizeCityName(value) {
+  return String(value || '').normalize('NFD').replace(/\p{Diacritic}/gu, '').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en');
+}
+
+async function resolveWeatherLocation(location) {
+  if (typeof location !== 'string' || !location.trim()) {
+    throw new WeatherProviderError('location_missing', 'Set the turf city or location in Turf Settings to enable weather.');
+  }
+  await loadWeatherCache();
+  const query = location.trim().replace(/\s+/g, ' ');
+  const cacheKey = normalizeLocationQuery(query);
+  const cached = weatherCache.locations[cacheKey];
+  if (cached && Date.now() - cached.resolvedAt < LOCATION_CACHE_MS &&
+      finiteNumber(cached.latitude) && finiteNumber(cached.longitude) &&
+      typeof cached.name === 'string' && typeof cached.timezone === 'string') {
+    return { ...cached, query };
+  }
+
+  const url = new URL('https://geocoding-api.open-meteo.com/v1/search');
+  url.searchParams.set('name', query);
+  url.searchParams.set('count', '10');
+  url.searchParams.set('language', 'en');
+  url.searchParams.set('format', 'json');
+  url.searchParams.set('countryCode', 'IN');
+  const result = await fetchWeatherJson(url, 'Open-Meteo Geocoding API');
+  if (!isRecord(result) || (result.results !== undefined && !Array.isArray(result.results))) {
+    throw new WeatherProviderError('invalid_provider_response', 'Open-Meteo Geocoding API returned an invalid location response.');
+  }
+  const results = (result.results || []).filter((item) =>
+    isRecord(item) &&
+    item.country_code === 'IN' &&
+    finiteNumber(item.latitude) &&
+    finiteNumber(item.longitude) &&
+    typeof item.name === 'string' &&
+    typeof item.timezone === 'string',
+  );
+  const [requestedName, ...qualifierParts] = query.split(',');
+  const qualifier = normalizeCityName(qualifierParts.join(','));
+  const exactResults = results.filter((item) =>
+    normalizeCityName(item.name) === normalizeCityName(requestedName) &&
+    (!qualifier || [item.admin1, item.admin2, item.country].some((part) => normalizeCityName(part) === qualifier)),
+  );
+  const candidates = exactResults.length ? exactResults : results.length === 1 ? results : [];
+  if (!candidates.length) {
+    if (results.length > 1 || exactResults.length > 1) {
+      throw new WeatherProviderError('location_ambiguous', 'The saved turf location matches multiple Indian places. Add its state, for example “Dharashiv, Maharashtra”.');
+    }
+    throw new WeatherProviderError('location_not_found', 'The saved turf location could not be resolved. Enter a recognized city and state in Turf Settings.');
+  }
+  if (candidates.length !== 1) {
+    throw new WeatherProviderError('location_ambiguous', 'The saved turf location matches multiple Indian places. Add its state, for example “Dharashiv, Maharashtra”.');
+  }
+  const match = candidates[0];
+  const resolved = {
+    name: match.name,
+    admin1: typeof match.admin1 === 'string' ? match.admin1 : null,
+    country: typeof match.country === 'string' ? match.country : 'India',
+    latitude: match.latitude,
+    longitude: match.longitude,
+    timezone: match.timezone,
+    resolvedAt: Date.now(),
+  };
+  weatherCache.locations[cacheKey] = resolved;
+  await persistWeatherCache();
+  return { ...resolved, query };
+}
+
+function validateForecastResponse(data) {
+  return isRecord(data) &&
+    finiteNumber(data.latitude) &&
+    finiteNumber(data.longitude) &&
+    data.timezone === 'Asia/Kolkata' &&
+    isRecord(data.current) &&
+    typeof data.current.time === 'string' &&
+    finiteNumber(data.current.temperature_2m) &&
+    isRecord(data.daily) &&
+    Array.isArray(data.daily.time) &&
+    Array.isArray(data.daily.weather_code) &&
+    Array.isArray(data.daily.temperature_2m_min) &&
+    Array.isArray(data.daily.temperature_2m_max) &&
+    data.daily.time.length > 0 &&
+    data.daily.time.length === data.daily.weather_code.length &&
+    data.daily.time.length === data.daily.temperature_2m_min.length &&
+    data.daily.time.length === data.daily.temperature_2m_max.length &&
+    isRecord(data.hourly) &&
+    Array.isArray(data.hourly.time) &&
+    Array.isArray(data.hourly.temperature_2m) &&
+    Array.isArray(data.hourly.weather_code) &&
+    data.hourly.time.length > 0 &&
+    data.hourly.time.length === data.hourly.temperature_2m.length &&
+    data.hourly.time.length === data.hourly.weather_code.length &&
+    (!data.hourly.precipitation_probability ||
+      (Array.isArray(data.hourly.precipitation_probability) &&
+        data.hourly.time.length === data.hourly.precipitation_probability.length)) &&
+    (!data.hourly.precipitation ||
+      (Array.isArray(data.hourly.precipitation) &&
+        data.hourly.time.length === data.hourly.precipitation.length));
+}
+
+async function fetchOpenMeteoForecast(location) {
+  const cacheKey = `${location.latitude.toFixed(4)},${location.longitude.toFixed(4)}`;
+  await loadWeatherCache();
+  const cached = weatherCache.forecasts[cacheKey];
+  const age = cached ? Date.now() - cached.retrievedAt : Infinity;
+  if (cached && age >= 0 && age < WEATHER_FRESH_MS && validateForecastResponse(cached.data)) {
+    return { data: cached.data, retrievedAt: cached.retrievedAt, freshness: 'fresh', ageMs: age };
+  }
+
+  const url = new URL('https://api.open-meteo.com/v1/forecast');
+  url.searchParams.set('latitude', String(location.latitude));
+  url.searchParams.set('longitude', String(location.longitude));
+  url.searchParams.set('current', 'temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,rain,weather_code,wind_speed_10m');
+  url.searchParams.set('hourly', 'temperature_2m,precipitation_probability,precipitation,weather_code');
+  url.searchParams.set('daily', 'temperature_2m_max,temperature_2m_min,weather_code,sunrise,sunset');
+  url.searchParams.set('timezone', 'Asia/Kolkata');
+  url.searchParams.set('forecast_days', '7');
+  try {
+    const data = await fetchWeatherJson(url, WEATHER_PROVIDER);
+    if (!validateForecastResponse(data)) {
+      throw new WeatherProviderError('invalid_provider_response', 'Open-Meteo returned an incomplete forecast response.');
+    }
+    const retrievedAt = Date.now();
+    weatherCache.forecasts[cacheKey] = { data, retrievedAt };
+    await persistWeatherCache();
+    return { data, retrievedAt, freshness: 'live', ageMs: 0 };
+  } catch (error) {
+    if (cached && validateForecastResponse(cached.data)) {
+      const cachedAge = Date.now() - cached.retrievedAt;
+      if (cachedAge >= 0 && cachedAge <= WEATHER_STALE_MS) {
+        return { data: cached.data, retrievedAt: cached.retrievedAt, freshness: 'stale', ageMs: cachedAge };
+      }
+    }
+    throw error;
+  }
+}
+
+function weatherSummary(code) {
+  const descriptions = {
+    0: 'Clear sky',
+    1: 'Mainly clear',
+    2: 'Partly cloudy',
+    3: 'Overcast',
+    45: 'Fog',
+    48: 'Depositing rime fog',
+    51: 'Light drizzle',
+    53: 'Moderate drizzle',
+    55: 'Dense drizzle',
+    56: 'Light freezing drizzle',
+    57: 'Dense freezing drizzle',
+    61: 'Slight rain',
+    63: 'Moderate rain',
+    65: 'Heavy rain',
+    66: 'Light freezing rain',
+    67: 'Heavy freezing rain',
+    71: 'Slight snowfall',
+    73: 'Moderate snowfall',
+    75: 'Heavy snowfall',
+    77: 'Snow grains',
+    80: 'Slight rain showers',
+    81: 'Moderate rain showers',
+    82: 'Violent rain showers',
+    85: 'Slight snow showers',
+    86: 'Heavy snow showers',
+    95: 'Thunderstorm',
+    96: 'Thunderstorm with slight hail',
+    99: 'Thunderstorm with heavy hail',
+  };
+  return Number.isInteger(code) ? descriptions[code] || null : null;
+}
+
+function weatherConditions(date, hour, location, forecast, servedAt = new Date().toISOString()) {
+  const { data, retrievedAt, freshness, ageMs } = forecast;
+  const dateIndex = data.daily.time.indexOf(date);
+  if (dateIndex < 0) {
+    return unavailableWeather('date_out_of_range', 'The requested date is outside the available seven-day forecast.', {
+      provider: WEATHER_PROVIDER,
+      location,
+      forecastRange: {
+        from: data.daily.time[0] || null,
+        through: data.daily.time.at(-1) || null,
+      },
+      retrievedAt: new Date(retrievedAt).toISOString(),
+      servedAt,
+      freshness,
+      cached: freshness === 'stale' || freshness === 'fresh',
+      dataAgeSeconds: Math.floor(ageMs / 1000),
+      warnings: {
+        available: false,
+        provider: 'India Meteorological Department',
+        status: 'credentials_required',
+        message: 'Official IMD warning data is not included because its documented API returned HTTP 401 during verification.',
+      },
+    });
+  }
+  const current = isRecord(data.current) ? data.current : {};
+  const currentConditions = {
+    type: 'modelled_current',
+    observed: false,
+    validAt: typeof current.time === 'string' ? current.time : null,
+  };
+  if (finiteNumber(current.temperature_2m)) currentConditions.temperatureC = current.temperature_2m;
+  if (finiteNumber(current.relative_humidity_2m)) currentConditions.relativeHumidityPercent = current.relative_humidity_2m;
+  if (finiteNumber(current.apparent_temperature)) currentConditions.apparentTemperatureC = current.apparent_temperature;
+  if (finiteNumber(current.precipitation)) currentConditions.precipitationMm = current.precipitation;
+  if (finiteNumber(current.rain)) current.rainMm = current.rain;
+  if (Number.isInteger(current.weather_code)) {
+    currentConditions.weatherCode = current.weather_code;
+    const summary = weatherSummary(current.weather_code);
+    if (summary) currentConditions.summary = summary;
+  }
+  if (finiteNumber(current.wind_speed_10m)) currentConditions.windSpeedKmh = current.wind_speed_10m;
+
+  const dailyCode = data.daily.weather_code[dateIndex];
+  const daily = {
+    date,
+    minimumTemperatureC: finiteNumber(data.daily.temperature_2m_min[dateIndex])
+      ? data.daily.temperature_2m_min[dateIndex]
+      : null,
+    maximumTemperatureC: finiteNumber(data.daily.temperature_2m_max[dateIndex])
+      ? data.daily.temperature_2m_max[dateIndex]
+      : null,
+    weatherCode: Number.isInteger(dailyCode) ? dailyCode : null,
+  };
+  const dailySummary = weatherSummary(daily.weatherCode);
+  if (dailySummary) daily.summary = dailySummary;
+  if (typeof data.daily.sunrise?.[dateIndex] === 'string') daily.sunrise = data.daily.sunrise[dateIndex];
+  if (typeof data.daily.sunset?.[dateIndex] === 'string') daily.sunset = data.daily.sunset[dateIndex];
+
+  const targetTime = `${date}T${String(hour).padStart(2, '0')}:00`;
+  const hourIndex = data.hourly.time.indexOf(targetTime);
+  let hourly = null;
+  if (hourIndex >= 0) {
+    const code = data.hourly.weather_code[hourIndex];
+    hourly = { date, time: targetTime };
+    if (finiteNumber(data.hourly.temperature_2m[hourIndex])) hourly.temperatureC = data.hourly.temperature_2m[hourIndex];
+    if (finiteNumber(data.hourly.precipitation_probability?.[hourIndex])) {
+      hourly.precipitationProbabilityPercent = data.hourly.precipitation_probability[hourIndex];
+    }
+    if (finiteNumber(data.hourly.precipitation?.[hourIndex])) hourly.precipitationMm = data.hourly.precipitation[hourIndex];
+    if (Number.isInteger(code)) {
+      hourly.weatherCode = code;
+      const summary = weatherSummary(code);
+      if (summary) hourly.summary = summary;
+    }
+  }
+  const probability = hourly?.precipitationProbabilityPercent;
+  const response = {
+    available: true,
+    status: 'available',
+    provider: WEATHER_PROVIDER,
+    location: {
+      query: location.query,
+      name: location.name,
+      admin1: location.admin1,
+      country: location.country,
+      latitude: location.latitude,
+      longitude: location.longitude,
+      timezone: location.timezone,
+      resolvedBy: 'Open-Meteo Geocoding API',
+    },
+    retrievedAt: new Date(retrievedAt).toISOString(),
+    servedAt,
+    freshness,
+    cached: freshness === 'stale' || freshness === 'fresh',
+    dataAgeSeconds: Math.floor(ageMs / 1000),
+    currentConditions,
+    observation: null,
+    today: {
+      date: data.daily.time[0],
+      minimumTemperatureC: finiteNumber(data.daily.temperature_2m_min[0]) ? data.daily.temperature_2m_min[0] : null,
+      maximumTemperatureC: finiteNumber(data.daily.temperature_2m_max[0]) ? data.daily.temperature_2m_max[0] : null,
+      weatherCode: Number.isInteger(data.daily.weather_code[0]) ? data.daily.weather_code[0] : null,
+      ...(weatherSummary(data.daily.weather_code[0]) ? { summary: weatherSummary(data.daily.weather_code[0]) } : {}),
+    },
+    requestedDate: daily,
+    hourly,
+    warnings: {
+      available: false,
+      provider: 'India Meteorological Department',
+      status: 'credentials_required',
+      message: 'Official IMD warning data is not included because its documented API returned HTTP 401 during verification.',
+    },
+  };
+  if (typeof probability === 'number') {
+    response.probability = probability;
+    response.risk = probability >= 65 ? 'High' : probability >= 35 ? 'Medium' : 'Low';
+  }
+  return response;
+}
+
+async function getWeather(date, hour, location) {
+  if (!isValidDateValue(date)) {
+    return unavailableWeather('invalid_date', 'Use a valid requested date in YYYY-MM-DD format.');
+  }
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) {
+    return unavailableWeather('invalid_hour', 'Requested booking time must be an hour from 0 to 23.');
+  }
+  try {
+    const resolvedLocation = await resolveWeatherLocation(location);
+    const forecast = await fetchOpenMeteoForecast(resolvedLocation);
+    return weatherConditions(date, hour, resolvedLocation, forecast);
+  } catch (error) {
+    if (error instanceof WeatherProviderError) {
+      return unavailableWeather(error.status, error.message, {
+        warnings: {
+          available: false,
+          provider: 'India Meteorological Department',
+          status: 'credentials_required',
+          message: 'Official IMD warning data is not included because its documented API returned HTTP 401 during verification.',
+        },
+      });
+    }
+    console.error('[Weather advisor]', error);
+    return unavailableWeather('provider_unavailable', 'Weather data is temporarily unavailable. Booking services remain available.');
+  }
+}
+
+async function weatherRisk(date, hour, location) {
+  const weather = await getWeather(date, hour, location);
+  if (!weather.available) return weather;
+  return {
+    ...weather,
+    source: WEATHER_PROVIDER,
+  };
 }
 function demandScore(bookings, date, hour, section, risk) { const target = new Date(`${date}T00:00:00`); const weighted = bookings.filter((b) => b.section === section && Number(b.startHour) === Number(hour) && new Date(`${b.date}T00:00:00`).getDay() === target.getDay() && !b.cancelledAt && b.paymentStatus !== 'refunded').reduce((n, b) => n + Math.max(.2, 1 - Math.max(0, (target - new Date(`${b.date}T00:00:00`)) / 86400000) / 220), 0); const weatherFactor = risk === 'High' ? .65 : risk === 'Medium' ? .82 : 1; return Math.min(100, Math.round(weighted * 16 * weatherFactor)); }
 async function writeFileStore(store) {
@@ -558,6 +924,20 @@ app.get('/api/ai/owner-recommendations', route(async (req, res) => {
 app.get('/api/weather-risk', route(async (req, res) => {
   const store = await readStore();
   res.json(await weatherRisk(String(req.query.date || today()), Number(req.query.hour || 18), store.settings.turfLocation));
+}));
+app.get('/api/weather', route(async (req, res) => {
+  const store = await readStore();
+  const date = req.query.date === undefined ? indiaToday() : String(req.query.date);
+  const hourValue = req.query.hour === undefined ? '18' : String(req.query.hour);
+  const hour = /^\d{1,2}$/.test(hourValue) ? Number(hourValue) : Number.NaN;
+  const weather = await getWeather(date, hour, store.settings.turfLocation);
+  if (weather.available) return res.json(weather);
+  const statusCode = ['invalid_date', 'invalid_hour'].includes(weather.status)
+    ? 400
+    : ['location_missing', 'location_ambiguous', 'location_not_found', 'date_out_of_range'].includes(weather.status)
+      ? 422
+      : 503;
+  res.status(statusCode).json(weather);
 }));
 app.get('/api/forecast', route(async (req, res) => {
   const store = await readStore();
