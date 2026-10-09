@@ -2159,7 +2159,9 @@ function OwnerPricing({
             <>
               <div className="owner-price-advisor-facts">
                 <p><span>Weather</span><strong>{advisor.weather.available
-                  ? `${advisor.weather.risk} rain risk · ${advisor.weather.probability}% precipitation`
+                  ? Number.isFinite(advisor.weather.probability)
+                    ? `${advisor.weather.risk} rain risk · ${advisor.weather.probability}% precipitation`
+                    : 'Rain probability unavailable'
                   : 'Live weather unavailable'}</strong></p>
                 <p><span>Demand</span><strong>{advisor.demand.historySufficient
                   ? `${advisor.demand.level[0].toUpperCase()}${advisor.demand.level.slice(1)} · ${advisor.demand.score}%`
