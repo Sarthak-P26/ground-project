@@ -2034,6 +2034,117 @@ textarea:focus {
   font-size: 0.72rem;
 }
 
+.student-weather {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 16px;
+  padding: 15px 17px;
+  border: 1px solid rgba(28, 107, 72, 0.13);
+  border-radius: 16px;
+  background: linear-gradient(120deg, #f7fbf8, #f1f7f4);
+}
+
+.student-weather-heading,
+.student-weather-title {
+  display: flex;
+  align-items: center;
+}
+
+.student-weather-heading {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.student-weather-title {
+  gap: 8px;
+  color: #176b48;
+}
+
+.student-weather-title h2 {
+  margin: 0;
+  color: #19392b;
+  font-size: 0.98rem;
+}
+
+.student-weather-heading > a {
+  color: #386950;
+  font-size: 0.74rem;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.student-weather-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.student-weather-facts article {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 11px;
+  border: 1px solid rgba(28, 107, 72, 0.09);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.student-weather-facts article > span {
+  color: #64756b;
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+.student-weather-facts article > strong {
+  color: #243d30;
+  font-size: 0.9rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.student-weather-facts article > small {
+  color: #65776c;
+  font-size: 0.74rem;
+  line-height: 1.35;
+}
+
+.student-weather-message,
+.student-weather-freshness {
+  margin: 0;
+  color: #68766e;
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.student-weather-freshness.stale {
+  color: #8b5b12;
+  font-weight: 700;
+}
+
+.student-weather-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #9a3c35;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.student-weather-error button {
+  flex: 0 0 auto;
+  padding: 5px 10px;
+  border: 1px solid rgba(154, 60, 53, 0.28);
+  border-radius: 8px;
+  background: #fff;
+  color: #8c332d;
+  font: inherit;
+  font-weight: 750;
+  cursor: pointer;
+}
+
 .date-picker {
   flex: 0 0 220px;
   align-content: center;
@@ -2263,6 +2374,14 @@ textarea:focus {
     margin-right: -14px;
     margin-left: -14px;
     padding: 2px 14px 8px;
+  }
+
+  .student-weather-facts {
+    grid-template-columns: 1fr;
+  }
+
+  .student-weather-heading {
+    align-items: flex-start;
   }
 
   .date-picker {

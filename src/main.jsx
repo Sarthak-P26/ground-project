@@ -7,6 +7,7 @@ import {
   CalendarDays,
   CheckCircle2,
   ClipboardCheck,
+  CloudSun,
   Clock,
   CreditCard,
   Download,
@@ -262,6 +263,21 @@ function App() {
     return toDateInput(date);
   }, [settings.bookingWindowDays]);
   const activeBookings = bookings.filter((booking) => !booking.cancelledAt);
+  const studentWeatherHour = useMemo(() => {
+    if (selectedSlot) return Number(selectedSlot.hour);
+    return slots.find((hour) =>
+      isFutureBookingSlot(activeDate, hour) &&
+      !bookings.some((booking) =>
+        bookingMatchesSlot(booking, activeDate, booking.section, hour) &&
+        !booking.cancelledAt &&
+        booking.paymentStatus !== 'refunded',
+      ),
+    ) ?? null;
+  }, [selectedSlot, slots, activeDate, bookings]);
+  const [studentWeather, setStudentWeather] = useState(null);
+  const [studentWeatherLoading, setStudentWeatherLoading] = useState(false);
+  const [studentWeatherError, setStudentWeatherError] = useState('');
+  const [studentWeatherRetry, setStudentWeatherRetry] = useState(0);
 
   const myBookings = currentUser
     ? bookings
@@ -340,6 +356,60 @@ function App() {
       setSkipCancellationConfirmation(false);
     }
   }, [currentUser?.id]);
+
+  useEffect(() => {
+    if (!currentUser || currentUser.role !== 'student' || studentWeatherHour === null) {
+      setStudentWeather(null);
+      setStudentWeatherLoading(false);
+      setStudentWeatherError(studentWeatherHour === null && currentUser?.role === 'student'
+        ? 'There are no upcoming booking slots on this date to forecast.'
+        : '');
+      return undefined;
+    }
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeout = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, 12000);
+    setStudentWeather(null);
+    setStudentWeatherError('');
+    setStudentWeatherLoading(true);
+
+    async function loadStudentWeather() {
+      try {
+        const query = new URLSearchParams({
+          date: activeDate,
+          hour: String(studentWeatherHour),
+        });
+        const response = await fetch(`/api/weather?${query}`, { signal: controller.signal });
+        let result;
+        try {
+          result = await response.json();
+        } catch {
+          throw new Error('Weather data could not be read. Please try again.');
+        }
+        if (!response.ok || !result?.available) {
+          throw new Error(result?.message || 'Weather is currently unavailable.');
+        }
+        setStudentWeather(result);
+      } catch (error) {
+        if (controller.signal.aborted && !timedOut) return;
+        setStudentWeatherError(timedOut
+          ? 'Weather is taking too long to respond.'
+          : error.message || 'Weather is currently unavailable.');
+      } finally {
+        window.clearTimeout(timeout);
+        if (!controller.signal.aborted || timedOut) setStudentWeatherLoading(false);
+      }
+    }
+
+    void loadStudentWeather();
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [currentUser?.role, activeDate, studentWeatherHour, studentWeatherRetry]);
 
   useEffect(() => {
     async function loadServerStore() {
@@ -867,6 +937,85 @@ function App() {
           <span>Choose another date</span>
           <input type="date" min={today} max={latestBookingDate} value={activeDate} onChange={(event) => setActiveDate(event.target.value)} />
         </label>
+      </section>
+
+      <section className="student-weather" aria-label="Weather forecast" aria-live="polite">
+        <div className="student-weather-heading">
+          <div className="student-weather-title">
+            <CloudSun size={19} aria-hidden="true" />
+            <h2>Weather at the turf</h2>
+          </div>
+          <a href="https://open-meteo.com/" target="_blank" rel="noreferrer">
+            Weather by Open-Meteo
+          </a>
+        </div>
+        {studentWeatherLoading && <p className="student-weather-message" role="status">Loading forecast…</p>}
+        {studentWeatherError && (
+          <div className="student-weather-error" role="alert">
+            <span>{studentWeatherError}</span>
+            {studentWeatherHour !== null && (
+              <button type="button" onClick={() => setStudentWeatherRetry((retry) => retry + 1)}>
+                Retry
+              </button>
+            )}
+          </div>
+        )}
+        {studentWeather && (
+          <>
+            <div className="student-weather-facts">
+              <article>
+                <span>Current conditions · modelled</span>
+                <strong>
+                  {Number.isFinite(studentWeather.currentConditions?.temperatureC)
+                    ? `${studentWeather.currentConditions.temperatureC}°C`
+                    : 'Temperature unavailable'}
+                </strong>
+                {studentWeather.currentConditions?.summary && <small>{studentWeather.currentConditions.summary}</small>}
+              </article>
+              <article>
+                <span>Today's forecast</span>
+                <strong>
+                  {Number.isFinite(studentWeather.today?.minimumTemperatureC) &&
+                  Number.isFinite(studentWeather.today?.maximumTemperatureC)
+                    ? `${studentWeather.today.minimumTemperatureC}°–${studentWeather.today.maximumTemperatureC}°C`
+                    : 'Temperature range unavailable'}
+                </strong>
+                {studentWeather.today?.summary && <small>{studentWeather.today.summary}</small>}
+              </article>
+              <article>
+                <span>Selected booking · {formatDate(activeDate)} · {formatHour(studentWeatherHour)}</span>
+                {studentWeather.hourly ? (
+                  <>
+                    <strong>
+                      {studentWeather.hourly.summary || 'Conditions unavailable'}
+                      {Number.isFinite(studentWeather.hourly.temperatureC)
+                        ? ` · ${studentWeather.hourly.temperatureC}°C`
+                        : ''}
+                    </strong>
+                    {Number.isFinite(studentWeather.hourly.precipitationProbabilityPercent) && (
+                      <small>{studentWeather.hourly.precipitationProbabilityPercent}% precipitation probability</small>
+                    )}
+                  </>
+                ) : <strong>Forecast for this hour unavailable</strong>}
+              </article>
+            </div>
+            <p className={`student-weather-freshness ${studentWeather.freshness === 'stale' ? 'stale' : ''}`}>
+              {studentWeather.freshness === 'stale'
+                ? 'Stale cached forecast'
+                : studentWeather.cached
+                  ? 'Cached forecast'
+                  : 'Live forecast'}
+              {studentWeather.retrievedAt && (
+                <> · Retrieved {new Date(studentWeather.retrievedAt).toLocaleString()}</>
+              )}
+              {Number.isFinite(studentWeather.dataAgeSeconds) && (
+                <> · {studentWeather.dataAgeSeconds < 60
+                  ? `${studentWeather.dataAgeSeconds}s old`
+                  : `${Math.floor(studentWeather.dataAgeSeconds / 60)}m old`}</>
+              )}
+            </p>
+          </>
+        )}
       </section>
 
       <section className="workspace student-workspace" id="schedule">
