@@ -184,6 +184,98 @@ function isBlockedDate(settings, date) {
   return settings.maintenanceDates?.includes(date);
 }
 
+function indiaLocalHour() {
+  return Number(new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    hour: '2-digit',
+    hourCycle: 'h23',
+  }).format(new Date()));
+}
+
+function useWeatherForecast(date, hour, enabled = true) {
+  const [weather, setWeather] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [retry, setRetry] = useState(0);
+
+  useEffect(() => {
+    if (!enabled || !date || !Number.isInteger(Number(hour)) || Number(hour) < 0 || Number(hour) > 23) {
+      setWeather(null);
+      setLoading(false);
+      setError('');
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeout = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, 12000);
+    setWeather(null);
+    setError('');
+    setLoading(true);
+
+    async function loadWeather() {
+      try {
+        const query = new URLSearchParams({ date, hour: String(Number(hour)) });
+        const response = await fetch(`/api/weather?${query}`, { signal: controller.signal });
+        let result;
+        try {
+          result = await response.json();
+        } catch {
+          throw new Error('Weather data could not be read. Please try again.');
+        }
+        if (!response.ok || !result?.available) {
+          throw new Error(result?.message || 'Weather is currently unavailable.');
+        }
+        setWeather(result);
+      } catch (requestError) {
+        if (controller.signal.aborted && !timedOut) return;
+        setError(timedOut
+          ? 'Weather is taking too long to respond.'
+          : requestError.message || 'Weather is currently unavailable.');
+      } finally {
+        window.clearTimeout(timeout);
+        if (!controller.signal.aborted || timedOut) setLoading(false);
+      }
+    }
+
+    void loadWeather();
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [date, hour, enabled, retry]);
+
+  return {
+    weather,
+    loading,
+    error,
+    retry: () => setRetry((current) => current + 1),
+  };
+}
+
+function WeatherFreshness({ weather, className = '' }) {
+  if (!weather) return null;
+  const freshness = weather.freshness === 'stale'
+    ? 'Stale cached forecast'
+    : weather.cached
+      ? 'Cached forecast'
+      : 'Live forecast';
+  return (
+    <p className={className}>
+      {freshness}
+      {weather.retrievedAt && <> · Updated {new Date(weather.retrievedAt).toLocaleString()}</>}
+      {Number.isFinite(weather.dataAgeSeconds) && (
+        <> · {weather.dataAgeSeconds < 60
+          ? `${weather.dataAgeSeconds}s old`
+          : `${Math.floor(weather.dataAgeSeconds / 60)}m old`}</>
+      )}
+    </p>
+  );
+}
+
 function isFutureOrToday(date) {
   return date >= toDateInput(new Date());
 }
@@ -265,19 +357,25 @@ function App() {
   const activeBookings = bookings.filter((booking) => !booking.cancelledAt);
   const studentWeatherHour = useMemo(() => {
     if (selectedSlot) return Number(selectedSlot.hour);
-    return slots.find((hour) =>
+    const availableHour = isBlockedDate(settings, activeDate) ? undefined : slots.find((hour) =>
       isFutureBookingSlot(activeDate, hour) &&
-      !bookings.some((booking) =>
-        bookingMatchesSlot(booking, activeDate, booking.section, hour) &&
-        !booking.cancelledAt &&
-        booking.paymentStatus !== 'refunded',
+      settings.sections.some((section) =>
+        !bookings.some((booking) =>
+          bookingMatchesSlot(booking, activeDate, section, hour) &&
+          !booking.cancelledAt &&
+          booking.paymentStatus !== 'refunded',
+        ),
       ),
-    ) ?? null;
-  }, [selectedSlot, slots, activeDate, bookings]);
-  const [studentWeather, setStudentWeather] = useState(null);
-  const [studentWeatherLoading, setStudentWeatherLoading] = useState(false);
-  const [studentWeatherError, setStudentWeatherError] = useState('');
-  const [studentWeatherRetry, setStudentWeatherRetry] = useState(0);
+    );
+    if (availableHour !== undefined) return availableHour;
+    return activeDate === today ? indiaLocalHour() : slots[0] ?? 12;
+  }, [selectedSlot, slots, activeDate, bookings, settings.sections, settings.maintenanceDates, today]);
+  const {
+    weather: studentWeather,
+    loading: studentWeatherLoading,
+    error: studentWeatherError,
+    retry: retryStudentWeather,
+  } = useWeatherForecast(activeDate, studentWeatherHour, currentUser?.role === 'student');
 
   const myBookings = currentUser
     ? bookings
@@ -356,60 +454,6 @@ function App() {
       setSkipCancellationConfirmation(false);
     }
   }, [currentUser?.id]);
-
-  useEffect(() => {
-    if (!currentUser || currentUser.role !== 'student' || studentWeatherHour === null) {
-      setStudentWeather(null);
-      setStudentWeatherLoading(false);
-      setStudentWeatherError(studentWeatherHour === null && currentUser?.role === 'student'
-        ? 'There are no upcoming booking slots on this date to forecast.'
-        : '');
-      return undefined;
-    }
-    const controller = new AbortController();
-    let timedOut = false;
-    const timeout = window.setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, 12000);
-    setStudentWeather(null);
-    setStudentWeatherError('');
-    setStudentWeatherLoading(true);
-
-    async function loadStudentWeather() {
-      try {
-        const query = new URLSearchParams({
-          date: activeDate,
-          hour: String(studentWeatherHour),
-        });
-        const response = await fetch(`/api/weather?${query}`, { signal: controller.signal });
-        let result;
-        try {
-          result = await response.json();
-        } catch {
-          throw new Error('Weather data could not be read. Please try again.');
-        }
-        if (!response.ok || !result?.available) {
-          throw new Error(result?.message || 'Weather is currently unavailable.');
-        }
-        setStudentWeather(result);
-      } catch (error) {
-        if (controller.signal.aborted && !timedOut) return;
-        setStudentWeatherError(timedOut
-          ? 'Weather is taking too long to respond.'
-          : error.message || 'Weather is currently unavailable.');
-      } finally {
-        window.clearTimeout(timeout);
-        if (!controller.signal.aborted || timedOut) setStudentWeatherLoading(false);
-      }
-    }
-
-    void loadStudentWeather();
-    return () => {
-      window.clearTimeout(timeout);
-      controller.abort();
-    };
-  }, [currentUser?.role, activeDate, studentWeatherHour, studentWeatherRetry]);
 
   useEffect(() => {
     async function loadServerStore() {
@@ -954,7 +998,7 @@ function App() {
           <div className="student-weather-error" role="alert">
             <span>{studentWeatherError}</span>
             {studentWeatherHour !== null && (
-              <button type="button" onClick={() => setStudentWeatherRetry((retry) => retry + 1)}>
+              <button type="button" onClick={retryStudentWeather}>
                 Retry
               </button>
             )}
@@ -983,7 +1027,7 @@ function App() {
                 {studentWeather.today?.summary && <small>{studentWeather.today.summary}</small>}
               </article>
               <article>
-                <span>Selected booking · {formatDate(activeDate)} · {formatHour(studentWeatherHour)}</span>
+                <span>{selectedSlot ? 'Selected booking forecast' : 'Forecast time'} · {formatDate(activeDate)} · {formatHour(studentWeatherHour)}</span>
                 {studentWeather.hourly ? (
                   <>
                     <strong>
@@ -999,21 +1043,10 @@ function App() {
                 ) : <strong>Forecast for this hour unavailable</strong>}
               </article>
             </div>
-            <p className={`student-weather-freshness ${studentWeather.freshness === 'stale' ? 'stale' : ''}`}>
-              {studentWeather.freshness === 'stale'
-                ? 'Stale cached forecast'
-                : studentWeather.cached
-                  ? 'Cached forecast'
-                  : 'Live forecast'}
-              {studentWeather.retrievedAt && (
-                <> · Retrieved {new Date(studentWeather.retrievedAt).toLocaleString()}</>
-              )}
-              {Number.isFinite(studentWeather.dataAgeSeconds) && (
-                <> · {studentWeather.dataAgeSeconds < 60
-                  ? `${studentWeather.dataAgeSeconds}s old`
-                  : `${Math.floor(studentWeather.dataAgeSeconds / 60)}m old`}</>
-              )}
-            </p>
+            <WeatherFreshness
+              weather={studentWeather}
+              className={`student-weather-freshness ${studentWeather.freshness === 'stale' ? 'stale' : ''}`}
+            />
           </>
         )}
       </section>
@@ -1048,20 +1081,27 @@ function App() {
                   <span>{formatHour(hour + settings.durationHours)}</span>
                 </div>
                 {settings.sections.map((section) => {
-                  const booking = activeBookings.find((item) => bookingMatchesSlot(item, activeDate, section, hour));
+                  const booking = bookings.find((item) =>
+                    bookingMatchesSlot(item, activeDate, section, hour) &&
+                    !item.cancelledAt &&
+                    item.paymentStatus !== 'refunded',
+                  );
+                  const started = !booking && !isFutureBookingSlot(activeDate, hour);
                   const override = activeSlotPrice(priceOverrides, activeDate, section, hour);
                   const slotPrice = override?.price ?? settings.price;
                   return (
                     <button
                       type="button"
-                      className={`slot-card ${booking ? 'booked' : 'available'} ${!booking && override?.type === 'promotion' ? 'special-price-card' : ''}`}
+                      className={`slot-card ${booking ? 'booked' : started ? 'started' : 'available'} ${!booking && !started && override?.type === 'promotion' ? 'special-price-card' : ''}`}
                       key={`${section}-${hour}`}
-                      onClick={() => !booking && setSelectedSlot({ section, hour, price: slotPrice })}
-                      disabled={Boolean(booking)}
-                      title={booking ? 'Unavailable' : `Book ${section}`}
+                      onClick={() => !booking && !started && setSelectedSlot({ section, hour, price: slotPrice })}
+                      disabled={Boolean(booking) || started}
+                      title={booking ? 'Unavailable' : started ? 'Started' : `Book ${section}`}
                     >
                       {booking ? (
                         <strong>Unavailable</strong>
+                      ) : started ? (
+                        <strong>Started</strong>
                       ) : (
                         <>
                           <strong>{override?.type === 'promotion' ? 'Special Price' : 'Available'}</strong>
@@ -1629,6 +1669,8 @@ function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCanc
         ))}
       </section>
 
+      <OwnerWeatherCard date={today} />
+
       <section className="owner-turfcast-insight" aria-labelledby="owner-turfcast-insight-title" aria-live="polite">
         <div className="owner-turfcast-insight-heading">
           <div className="owner-turfcast-insight-title">
@@ -1670,6 +1712,67 @@ function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCanc
         onCancelBooking={onCancelBooking}
       />
     </div>
+  );
+}
+
+function OwnerWeatherCard({ date }) {
+  const hour = indiaLocalHour();
+  const { weather, loading, error, retry } = useWeatherForecast(date, hour);
+  const current = weather?.currentConditions;
+  const today = weather?.today;
+  const precipitation = Number.isFinite(current?.precipitationMm)
+    ? `${current.precipitationMm} mm modelled precipitation`
+    : Number.isFinite(current?.rainMm)
+      ? `${current.rainMm} mm modelled rain`
+      : 'Precipitation unavailable';
+
+  return (
+    <section className="owner-panel owner-weather-card" aria-label="Weather at the turf" aria-live="polite">
+      <div className="owner-panel-heading">
+        <div>
+          <h3>Weather at the turf</h3>
+          <p>Modelled conditions from Open-Meteo · {weather?.location?.name || 'Today'}</p>
+        </div>
+        <button className="owner-insight-refresh" type="button" onClick={retry} disabled={loading} aria-label="Refresh turf weather">
+          <RefreshCw size={16} className={loading ? 'spinning' : ''} />
+        </button>
+      </div>
+      {loading && <p className="owner-weather-message" role="status">Loading today’s weather…</p>}
+      {error && (
+        <div className="owner-weather-error" role="alert">
+          <span>{error}</span>
+          <button type="button" onClick={retry}>Retry</button>
+        </div>
+      )}
+      {weather && (
+        <>
+          <div className="owner-weather-facts">
+            <article>
+              <span>Current conditions · modelled</span>
+              <strong>{Number.isFinite(current?.temperatureC) ? `${current.temperatureC}°C` : 'Temperature unavailable'}</strong>
+              <small>{current?.summary || 'Summary unavailable'}</small>
+            </article>
+            <article>
+              <span>Today’s forecast · high / low</span>
+              <strong>{Number.isFinite(today?.maximumTemperatureC) && Number.isFinite(today?.minimumTemperatureC)
+                ? `${today.maximumTemperatureC}° / ${today.minimumTemperatureC}°C`
+                : 'Temperature range unavailable'}</strong>
+              <small>{today?.summary || 'Summary unavailable'}</small>
+            </article>
+            <article>
+              <span>Current precipitation · modelled</span>
+              <strong>{precipitation}</strong>
+              {current?.validAt && <small>Valid at {new Date(current.validAt).toLocaleTimeString()}</small>}
+            </article>
+          </div>
+          <WeatherFreshness
+            weather={weather}
+            className={`owner-weather-freshness ${weather.freshness === 'stale' ? 'stale' : ''}`}
+          />
+          <a className="owner-weather-attribution" href="https://open-meteo.com/" target="_blank" rel="noreferrer">Weather by Open-Meteo</a>
+        </>
+      )}
+    </section>
   );
 }
 
@@ -1773,6 +1876,17 @@ function OwnerPricing({
   const [advisorLoading, setAdvisorLoading] = useState(false);
   const [advisorError, setAdvisorError] = useState('');
   const [advisorRefresh, setAdvisorRefresh] = useState(0);
+  const pricingWeatherHour = Number(startHour);
+  const {
+    weather: pricingWeather,
+    loading: pricingWeatherLoading,
+    error: pricingWeatherError,
+    retry: retryPricingWeather,
+  } = useWeatherForecast(
+    slotDate,
+    pricingWeatherHour,
+    Boolean(slotDate && slots.includes(pricingWeatherHour)),
+  );
 
   const selectedOverride = activeSlotPrice(priceOverrides, slotDate, section, Number(startHour));
   const upcomingOverrides = priceOverrides
@@ -1999,6 +2113,36 @@ function OwnerPricing({
               aria-label="Refresh price advice"
               title="Refresh price advice"
             ><RefreshCw size={15} className={advisorLoading ? 'spinning' : ''} /></button>
+          </div>
+          <div className="owner-pricing-weather" aria-label="Weather forecast for selected slot" aria-live="polite">
+            <div className="owner-pricing-weather-heading">
+              <span><strong>Forecast for selected slot</strong><small>{formatDate(slotDate)} · {formatHour(pricingWeatherHour)}</small></span>
+              <button type="button" onClick={retryPricingWeather} disabled={pricingWeatherLoading || !slots.includes(pricingWeatherHour)}>
+                <RefreshCw size={14} className={pricingWeatherLoading ? 'spinning' : ''} />
+                Retry
+              </button>
+            </div>
+            {pricingWeatherLoading && <p className="owner-price-advisor-status" role="status">Loading selected-slot weather…</p>}
+            {pricingWeatherError && <p className="owner-price-advisor-error" role="alert">{pricingWeatherError}</p>}
+            {pricingWeather && (
+              <>
+                <p className="owner-pricing-weather-result">
+                  <strong>{pricingWeather.requestedDate?.summary || 'Condition unavailable'}</strong>
+                  {' · '}
+                  {Number.isFinite(pricingWeather.hourly?.temperatureC)
+                    ? `${pricingWeather.hourly.temperatureC}°C`
+                    : 'Temperature unavailable'}
+                  {' · '}
+                  {Number.isFinite(pricingWeather.hourly?.precipitationProbabilityPercent)
+                    ? `${pricingWeather.hourly.precipitationProbabilityPercent}% precipitation probability`
+                    : 'Rain probability unavailable'}
+                </p>
+                <WeatherFreshness
+                  weather={pricingWeather}
+                  className={`owner-price-advisor-status ${pricingWeather.freshness === 'stale' ? 'stale' : ''}`}
+                />
+              </>
+            )}
           </div>
           {advisorLoading && <p className="owner-price-advisor-status">Checking comparable booking history…</p>}
           {advisorError && <p className="owner-price-advisor-error" role="alert">{advisorError}</p>}

@@ -1383,6 +1383,12 @@ textarea:focus {
   background-size: 18px 18px;
 }
 
+.slot-card.started {
+  color: #6d756f;
+  background: #eef1ef;
+  cursor: not-allowed;
+}
+
 .slot-card span {
   color: #8a5200;
   font-size: 0.78rem;
@@ -2236,6 +2242,10 @@ textarea:focus {
   color: #718078;
   background: #f2f5f3;
   background-image: none;
+}
+
+.student-experience .slot-card.started {
+  justify-items: center;
 }
 
 .student-experience .records-panel {
@@ -3350,6 +3360,86 @@ textarea:focus {
   text-underline-offset: 2px;
 }
 
+.owner-weather-card {
+  display: grid;
+  gap: 10px;
+}
+
+.owner-weather-card .owner-panel-heading {
+  align-items: center;
+  margin-bottom: 0;
+}
+
+.owner-weather-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.owner-weather-facts article {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--owner-line);
+  border-radius: 10px;
+  background: #fbfcfb;
+}
+
+.owner-weather-facts article > span,
+.owner-weather-facts article > small {
+  color: var(--owner-muted);
+  font-size: 0.74rem;
+  line-height: 1.4;
+}
+
+.owner-weather-facts article > strong {
+  color: var(--owner-ink);
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.owner-weather-message,
+.owner-weather-freshness,
+.owner-weather-attribution {
+  margin: 0;
+  color: var(--owner-muted);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.owner-weather-freshness.stale {
+  color: #8b5b12;
+  font-weight: 750;
+}
+
+.owner-weather-attribution {
+  justify-self: start;
+  color: var(--owner-green);
+  text-underline-offset: 2px;
+}
+
+.owner-weather-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #a23c35;
+  font-size: 0.8rem;
+}
+
+.owner-weather-error button {
+  padding: 5px 9px;
+  border: 1px solid var(--owner-line);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--owner-green);
+  font: inherit;
+  font-weight: 750;
+  cursor: pointer;
+}
+
 .owner-price-advisor {
   display: grid;
   gap: 10px;
@@ -3358,6 +3448,67 @@ textarea:focus {
   border-left: 3px solid var(--owner-green);
   border-radius: 10px;
   background: #f5f8f6;
+}
+
+.owner-pricing-weather {
+  display: grid;
+  gap: 7px;
+  padding: 10px 11px;
+  border: 1px solid var(--owner-line);
+  border-radius: 9px;
+  background: #fff;
+}
+
+.owner-pricing-weather-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--owner-ink);
+  font-size: 0.78rem;
+}
+
+.owner-pricing-weather-heading > span {
+  display: grid;
+  gap: 2px;
+}
+
+.owner-pricing-weather-heading small {
+  color: var(--owner-muted);
+  font-size: 0.72rem;
+}
+
+.owner-pricing-weather-heading button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 7px;
+  border: 1px solid var(--owner-line);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--owner-green);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.owner-pricing-weather-heading button:disabled,
+.owner-weather-error button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.owner-pricing-weather-result {
+  margin: 0;
+  color: var(--owner-ink);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.owner-price-advisor-status.stale {
+  color: #8b5b12;
+  font-weight: 750;
 }
 
 .owner-price-advisor-heading {
@@ -3520,7 +3671,8 @@ textarea:focus {
 
   .owner-metric-grid,
   .owner-list-grid,
-  .owner-chart-grid {
+  .owner-chart-grid,
+  .owner-weather-facts {
     grid-template-columns: 1fr;
   }
 
