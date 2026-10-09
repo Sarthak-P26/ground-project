@@ -20,12 +20,14 @@ import {
   LogIn,
   LogOut,
   Mail,
+  MessageCircle,
   Phone,
   Printer,
   RefreshCw,
   Save,
   Search,
   Settings,
+  Send,
   ShieldCheck,
   Sparkles,
   Star,
@@ -1587,6 +1589,7 @@ function OwnerExperience({
       {page === 'analytics' && <OwnerAnalytics bookings={activeBookings} settings={settings} />}
       {page === 'settings' && <OwnerTurfSettings settings={settings} onEdit={onOpenSettings} />}
       {page === 'profile' && <OwnerProfile user={user} onEdit={onOpenProfile} />}
+      <OwnerAssistantChat />
     </div>
   );
 }
@@ -1625,16 +1628,21 @@ function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCanc
   async function getAiRecommendation() {
     if (aiRequestRef.current) return;
     const controller = new AbortController();
+    let timedOut = false;
     aiRequestRef.current = controller;
     setAiLoading(true);
     setAiError('');
+    const timeout = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, 11000);
     try {
       const response = await fetch('/api/ai/owner-recommendations', {
         headers: authHeaders(),
         signal: controller.signal,
       });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.message || 'Could not load AI recommendations.');
+      const result = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(result?.message || 'Could not load AI recommendations.');
       const first = Array.isArray(result.recommendations) ? result.recommendations[0] : null;
       if (!first || typeof first.title !== 'string' || typeof first.reason !== 'string' || typeof first.action !== 'string') {
         throw new Error('AI recommendations could not be displayed. Please try again.');
@@ -1643,8 +1651,11 @@ function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCanc
     } catch (error) {
       if (!controller.signal.aborted && aiRequestRef.current === controller) {
         setAiError(error.message || 'AI recommendations are temporarily unavailable.');
+      } else if (timedOut && aiRequestRef.current === controller) {
+        setAiError('The recommendation request took too long. Your dashboard is still available; please retry.');
       }
     } finally {
+      window.clearTimeout(timeout);
       if (aiRequestRef.current === controller) {
         aiRequestRef.current = null;
         setAiLoading(false);
@@ -1697,7 +1708,7 @@ function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCanc
             <button type="button" onClick={() => void getAiRecommendation()} disabled={aiLoading}>Retry</button>
           </div>
         )}
-        {!aiLoading && !aiError && aiRecommendation && (
+        {aiRecommendation && (
           <article className="owner-turfcast-insight-content">
             <h4>{aiRecommendation.title}</h4>
             <p>{aiRecommendation.reason}</p>
@@ -1713,6 +1724,185 @@ function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCanc
         onMarkPaid={onMarkPaid}
         onCancelBooking={onCancelBooking}
       />
+    </div>
+  );
+}
+
+const ownerAssistantSuggestions = [
+  'Summarize how my turf is performing.',
+  'Which time slots have the lowest utilization?',
+  'How much revenue have I collected, and how much remains unpaid?',
+  'What should I focus on today?',
+  'Give me general advice on marketing my college turf.',
+];
+
+function OwnerAssistantChat() {
+  const [open, setOpen] = useState(false);
+  const [messages, setMessages] = useState([]);
+  const [draft, setDraft] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [lastFailedQuestion, setLastFailedQuestion] = useState('');
+  const requestRef = useRef(null);
+  const historyEndRef = useRef(null);
+
+  useEffect(() => {
+    if (open) historyEndRef.current?.scrollIntoView({ block: 'end', behavior: 'smooth' });
+  }, [open, messages, loading]);
+
+  useEffect(() => () => {
+    requestRef.current?.abort();
+    requestRef.current = null;
+  }, []);
+
+  async function sendQuestion(rawQuestion, addUserMessage = true) {
+    const question = String(rawQuestion || '').trim();
+    if (!question || loading || requestRef.current) return;
+    let historyMessages = messages;
+    if (!addUserMessage && messages.at(-1)?.role === 'user' && messages.at(-1)?.content === question) {
+      historyMessages = messages.slice(0, -1);
+    }
+    const priorMessages = historyMessages.slice(-12).map(({ role, content }) => ({ role, content }));
+    if (addUserMessage) {
+      setMessages((current) => [...current, {
+        id: `${Date.now()}-user`,
+        role: 'user',
+        content: question,
+      }]);
+    }
+    setDraft('');
+    setError('');
+    setLoading(true);
+    setLastFailedQuestion(question);
+    const controller = new AbortController();
+    requestRef.current = controller;
+    const timeout = window.setTimeout(() => controller.abort(), 16000);
+    try {
+      const response = await fetch('/api/ai/owner-assistant', {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ question, history: priorMessages }),
+        signal: controller.signal,
+      });
+      const result = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(result?.message || 'The assistant could not answer. Please retry.');
+      if (typeof result?.answer !== 'string' || !result.answer.trim()) {
+        throw new Error('The assistant returned an incomplete answer. Please retry.');
+      }
+      if (requestRef.current === controller) {
+        setMessages((current) => [...current, {
+          id: `${Date.now()}-assistant`,
+          role: 'assistant',
+          content: result.answer.trim(),
+          keyFindings: Array.isArray(result.keyFindings) ? result.keyFindings.filter((item) => typeof item === 'string') : [],
+          suggestedActions: Array.isArray(result.suggestedActions) ? result.suggestedActions.filter((item) => typeof item === 'string') : [],
+        }]);
+        setLastFailedQuestion('');
+      }
+    } catch (requestError) {
+      if (requestRef.current === controller) {
+        setError(controller.signal.aborted
+          ? 'The assistant took too long to respond. Please retry.'
+          : requestError.message || 'The assistant is temporarily unavailable.');
+      }
+    } finally {
+      window.clearTimeout(timeout);
+      if (requestRef.current === controller) {
+        requestRef.current = null;
+        setLoading(false);
+      }
+    }
+  }
+
+  function submitDraft(event) {
+    event.preventDefault();
+    void sendQuestion(draft);
+  }
+
+  return (
+    <div className="owner-assistant">
+      {open && (
+        <section className="owner-assistant-panel" role="dialog" aria-label="TurfCast AI Assistant">
+          <header className="owner-assistant-header">
+            <div className="owner-assistant-title">
+              <span className="owner-assistant-avatar"><Sparkles size={17} /></span>
+              <div><strong>TurfCast AI Assistant</strong><small>Business insights and general advice</small></div>
+            </div>
+            <button className="owner-assistant-close" type="button" onClick={() => setOpen(false)} aria-label="Minimize assistant" title="Minimize">
+              <X size={18} />
+            </button>
+          </header>
+          <div className="owner-assistant-messages" aria-live="polite" aria-relevant="additions text">
+            {messages.length === 0 && (
+              <div className="owner-assistant-welcome">
+                <strong>What would you like to know?</strong>
+                <p>For turf questions, I use your current booking and pricing summaries.</p>
+                <div className="owner-assistant-suggestions">
+                  {ownerAssistantSuggestions.map((question) => (
+                    <button key={question} type="button" onClick={() => void sendQuestion(question)} disabled={loading}>{question}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {messages.map((message) => (
+              <article className={`owner-assistant-message ${message.role}`} key={message.id}>
+                <span>{message.role === 'user' ? 'You' : 'TurfCast AI'}</span>
+                <p>{message.content}</p>
+                {message.keyFindings?.length > 0 && (
+                  <div className="owner-assistant-list">
+                    <strong>Key findings</strong>
+                    <ul>{message.keyFindings.map((item, index) => <li key={`${message.id}-finding-${index}`}>{item}</li>)}</ul>
+                  </div>
+                )}
+                {message.suggestedActions?.length > 0 && (
+                  <div className="owner-assistant-list">
+                    <strong>Suggested actions</strong>
+                    <ul>{message.suggestedActions.map((item, index) => <li key={`${message.id}-action-${index}`}>{item}</li>)}</ul>
+                  </div>
+                )}
+              </article>
+            ))}
+            {loading && <p className="owner-assistant-typing" role="status"><span /> Thinking…</p>}
+            <div ref={historyEndRef} />
+          </div>
+          {error && (
+            <div className="owner-assistant-error" role="alert">
+              <span>{error}</span>
+              {lastFailedQuestion && <button type="button" onClick={() => void sendQuestion(lastFailedQuestion, false)} disabled={loading}>Retry</button>}
+            </div>
+          )}
+          <form className="owner-assistant-composer" onSubmit={submitDraft}>
+            <textarea
+              aria-label="Message TurfCast AI Assistant"
+              placeholder="Ask about your turf or a general topic…"
+              value={draft}
+              maxLength={1500}
+              rows={2}
+              disabled={loading}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault();
+                  submitDraft(event);
+                }
+              }}
+            />
+            <button className="owner-assistant-send" type="submit" disabled={loading || !draft.trim()} aria-label="Send message">
+              <Send size={17} />
+            </button>
+          </form>
+        </section>
+      )}
+      <button
+        className="owner-assistant-toggle"
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        aria-expanded={open}
+        aria-label={open ? 'Close TurfCast AI Assistant' : 'Open TurfCast AI Assistant'}
+        title="TurfCast AI Assistant"
+      >
+        {open ? <X size={21} /> : <MessageCircle size={22} />}
+      </button>
     </div>
   );
 }
