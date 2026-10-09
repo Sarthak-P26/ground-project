@@ -346,7 +346,14 @@ app.get('/api/ai/owner-recommendations', route(async (req, res) => {
     'Keep each title brief and each reason/action to one or two short sentences.',
     `TurfCast data: ${JSON.stringify(businessContext)}`,
   ].join('\n');
-  const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  const model = String(process.env.GEMINI_MODEL || 'gemini-3.5-flash').replace(/^models\//, '');
+  const safeGoogleMessage = (message) => String(message || '')
+    .replaceAll(apiKey, '[redacted]')
+    .replace(/([?&]key=)[^&\s]+/gi, '$1[redacted]')
+    .slice(0, 800);
+  const logGeminiFailure = (details) => {
+    console.error('[Gemini owner recommendations]', JSON.stringify({ model, ...details }));
+  };
   let geminiResponse;
   try {
     geminiResponse = await fetch(
@@ -361,19 +368,85 @@ app.get('/api/ai/owner-recommendations', route(async (req, res) => {
         signal: AbortSignal.timeout(20000),
       },
     );
-  } catch {
-    return res.status(502).json({ message: 'AI recommendations are temporarily unavailable. Please try again shortly.' });
+  } catch (error) {
+    const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError';
+    logGeminiFailure({
+      category: timedOut ? 'timeout' : 'network',
+      error: timedOut ? 'Gemini request timed out.' : safeGoogleMessage(error?.cause?.code || error?.message || 'Network request failed.'),
+    });
+    return res.status(timedOut ? 504 : 502).json({
+      message: timedOut
+        ? 'Gemini took too long to respond. Please try again.'
+        : 'Could not connect to Gemini. Check the server network connection and try again.',
+    });
   }
   if (!geminiResponse.ok) {
-    return res.status(502).json({ message: 'AI recommendations are temporarily unavailable. Please try again shortly.' });
+    let errorBody = {};
+    try {
+      errorBody = await geminiResponse.json();
+    } catch {
+      errorBody = {};
+    }
+    const googleError = errorBody.error || {};
+    const googleMessage = safeGoogleMessage(googleError.message);
+    const normalizedError = `${googleError.status || ''} ${googleMessage}`.toLowerCase();
+    let category = 'server';
+    let message = 'Gemini is temporarily unavailable. Please try again shortly.';
+    let status = 502;
+    if (geminiResponse.status === 401 || /api key|credential|unauthenticated/.test(normalizedError)) {
+      category = 'credentials';
+      message = 'Gemini rejected the server credentials. Check GEMINI_API_KEY configuration.';
+      status = 503;
+    } else if (/quota|rate limit|resource_exhausted/.test(normalizedError) || geminiResponse.status === 429) {
+      category = 'quota';
+      message = 'Gemini is at its request or usage limit. Please try again later.';
+      status = 429;
+    } else if (geminiResponse.status === 404) {
+      category = 'model';
+      message = 'The configured Gemini model is unavailable. Set GEMINI_MODEL to an available generateContent model, such as gemini-3.5-flash.';
+      status = 503;
+    } else if (geminiResponse.status === 400) {
+      category = 'request';
+      message = 'Gemini rejected the recommendation request. Check GEMINI_MODEL and the server request configuration.';
+      status = 502;
+    } else if (geminiResponse.status === 403) {
+      category = 'permission';
+      message = 'Gemini denied this request. Check the API key permissions and Gemini API access.';
+      status = 503;
+    }
+    logGeminiFailure({
+      category,
+      httpStatus: geminiResponse.status,
+      googleCode: googleError.code || null,
+      googleStatus: googleError.status || null,
+      googleMessage: googleMessage || 'Google returned no error message.',
+    });
+    return res.status(status).json({ message });
   }
 
   let generated;
+  let result;
   try {
-    const result = await geminiResponse.json();
-    const text = result.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('').trim();
+    result = await geminiResponse.json();
+  } catch (error) {
+    logGeminiFailure({ category: 'response_parse', error: safeGoogleMessage(error?.message || 'Gemini returned invalid JSON.') });
+    return res.status(502).json({ message: 'Gemini returned an unreadable response. Please try again.' });
+  }
+  const candidate = result.candidates?.[0];
+  const blockedReason = result.promptFeedback?.blockReason;
+  if (blockedReason || ['SAFETY', 'PROHIBITED_CONTENT', 'BLOCKLIST', 'SPII'].includes(candidate?.finishReason)) {
+    const reason = blockedReason || candidate.finishReason;
+    logGeminiFailure({ category: 'blocked', blockReason: reason });
+    return res.status(422).json({ message: 'Gemini could not process this recommendation request. Please try again.' });
+  }
+  try {
+    const text = candidate?.content?.parts?.map((part) => part.text || '').join('').trim();
     generated = JSON.parse(text || '');
   } catch {
+    logGeminiFailure({
+      category: candidate?.finishReason && candidate.finishReason !== 'STOP' ? 'incomplete_response' : 'response_parse',
+      finishReason: candidate?.finishReason || null,
+    });
     return res.status(502).json({ message: 'AI recommendations could not be read. Please try again shortly.' });
   }
   const recommendations = Array.isArray(generated?.recommendations)
@@ -393,6 +466,11 @@ app.get('/api/ai/owner-recommendations', route(async (req, res) => {
         .filter((item) => item.title && item.reason && item.action)
     : [];
   if (recommendations.length < 3) {
+    logGeminiFailure({
+      category: 'response_schema',
+      finishReason: candidate?.finishReason || null,
+      validRecommendationCount: recommendations.length,
+    });
     return res.status(502).json({ message: 'AI recommendations could not be generated. Please try again shortly.' });
   }
   res.json({ recommendations });
