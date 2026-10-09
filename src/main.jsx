@@ -1038,9 +1038,9 @@ function App() {
                         ? ` · ${studentWeather.hourly.temperatureC}°C`
                         : ''}
                     </strong>
-                    {Number.isFinite(studentWeather.hourly.precipitationProbabilityPercent) && (
-                      <small>{studentWeather.hourly.precipitationProbabilityPercent}% precipitation probability</small>
-                    )}
+                    <small>{Number.isFinite(studentWeather.hourly.precipitationProbabilityPercent)
+                      ? `Rain probability: ${studentWeather.hourly.precipitationProbabilityPercent}%`
+                      : 'Rain probability unavailable'}</small>
                   </>
                 ) : <strong>Forecast for this hour unavailable</strong>}
               </article>
@@ -1762,9 +1762,16 @@ function OwnerWeatherCard({ date }) {
               <small>{today?.summary || 'Summary unavailable'}</small>
             </article>
             <article>
-              <span>Current precipitation · modelled</span>
+              <span>Modelled precipitation amount</span>
               <strong>{precipitation}</strong>
               {current?.validAt && <small>Valid at {new Date(current.validAt).toLocaleTimeString()}</small>}
+            </article>
+            <article>
+              <span>Rain probability · {formatHour(hour)} forecast</span>
+              <strong>{Number.isFinite(weather.hourly?.precipitationProbabilityPercent)
+                ? `${weather.hourly.precipitationProbabilityPercent}%`
+                : 'Rain probability unavailable'}</strong>
+              {weather.hourly?.summary && <small>{weather.hourly.summary}</small>}
             </article>
           </div>
           <WeatherFreshness
@@ -2136,7 +2143,7 @@ function OwnerPricing({
                     : 'Temperature unavailable'}
                   {' · '}
                   {Number.isFinite(pricingWeather.hourly?.precipitationProbabilityPercent)
-                    ? `${pricingWeather.hourly.precipitationProbabilityPercent}% precipitation probability`
+                    ? `Rain probability: ${pricingWeather.hourly.precipitationProbabilityPercent}%`
                     : 'Rain probability unavailable'}
                 </p>
                 <WeatherFreshness
