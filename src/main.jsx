@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Activity,
@@ -21,6 +21,7 @@ import {
   Mail,
   Phone,
   Printer,
+  RefreshCw,
   Save,
   Search,
   Settings,
@@ -60,6 +61,7 @@ const DEFAULT_SETTINGS = {
   bookingWindowDays: 14,
   maxActiveBookingsPerPhone: 2,
   maintenanceDates: [],
+  turfLocation: '',
 };
 
 function loadJson(key, fallback) {
@@ -1334,169 +1336,145 @@ function OwnerExperience({
 }
 
 function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCancelBooking, onViewBooking }) {
-  const [aiRecommendations, setAiRecommendations] = useState([]);
+  const [aiRecommendation, setAiRecommendation] = useState(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState('');
+  const aiRequestRef = useRef(null);
   const today = toDateInput(new Date());
-  const todayDate = new Date(`${today}T00:00:00`);
-  const weekStart = new Date(todayDate);
-  weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7));
-  const monthStart = `${today.slice(0, 7)}-01`;
-  const inRange = (booking, start, end = today) => booking.date >= start && booking.date <= end;
-  const activeBookings = bookings.filter((booking) => !booking.cancelledAt);
+  const confirmedBookings = bookings.filter((booking) =>
+    !booking.cancelledAt && booking.paymentStatus !== 'refunded',
+  );
   const collectedRevenue = (items) => items
-    .filter((booking) => booking.paymentStatus === 'paid')
+    .filter((booking) => booking.paymentStatus === 'paid' && !booking.cancelledAt)
     .reduce((sum, booking) => sum + Number(booking.price || 0), 0);
-  const todayBookings = activeBookings.filter((booking) => booking.date === today);
-  const weekBookings = activeBookings.filter((booking) => inRange(booking, toDateInput(weekStart)));
-  const monthBookings = activeBookings.filter((booking) => inRange(booking, monthStart));
+  const todayBookings = confirmedBookings.filter((booking) => booking.date === today);
   const capacity = makeTimeSlots(settings).length * settings.sections.length;
   const occupancy = capacity ? Math.round((todayBookings.length / capacity) * 100) : 0;
-  const upcomingBookings = activeBookings
-    .filter((booking) => booking.date >= today);
-  const upcomingCount = upcomingBookings.length;
-  const upcoming = [...upcomingBookings].sort((a, b) =>
-    `${a.date}-${a.startHour}`.localeCompare(`${b.date}-${b.startHour}`),
-  );
   const metrics = [
-    { label: "Today's Bookings", value: todayBookings.length, note: 'Reservations scheduled today' },
-    { label: "Today's Revenue", value: currency(collectedRevenue(todayBookings)), note: 'Payments collected' },
-    { label: "Today's Occupancy", value: `${occupancy}%`, note: `${todayBookings.length} of ${capacity} available slots` },
-    { label: 'Upcoming Bookings', value: upcomingCount, note: 'Next scheduled reservations' },
+    { label: "Today's bookings", value: todayBookings.length },
+    { label: "Today's collected revenue", value: currency(collectedRevenue(todayBookings)) },
+    { label: "Today's occupancy", value: `${occupancy}%` },
+    { label: 'Upcoming bookings', value: confirmedBookings.filter((booking) =>
+      bookingStartTimestamp(booking.date, booking.startHour) > Date.now(),
+    ).length },
   ];
-  const secondaryMetrics = [
-    { label: "This Week's Revenue", value: currency(collectedRevenue(weekBookings)), note: 'Payments collected this week' },
-    { label: "This Month's Revenue", value: currency(collectedRevenue(monthBookings)), note: 'Payments collected this month' },
-    { label: 'Total Bookings', value: bookings.length, note: 'All bookings, including history' },
-  ];
-  const attentionBookings = activeBookings
-    .filter((booking) => booking.date >= today && booking.paymentStatus !== 'paid')
+  const attentionBookings = confirmedBookings
+    .filter((booking) =>
+      booking.paymentStatus === 'unpaid' &&
+      bookingStartTimestamp(booking.date, booking.startHour) > Date.now(),
+    )
     .sort((a, b) => `${a.date}-${a.startHour}`.localeCompare(`${b.date}-${b.startHour}`))
-    .slice(0, 6);
-  const historyStart = new Date(`${today}T00:00:00`);
-  historyStart.setDate(historyStart.getDate() - 27);
-  const historyStartDate = toDateInput(historyStart);
-  const observedBookings = activeBookings.filter((booking) => booking.date >= historyStartDate && booking.date <= today);
-  const slotHours = makeTimeSlots(settings);
-  const opportunities = [];
-  for (let weekday = 0; weekday < 7; weekday += 1) {
-    const weekdayDates = Array.from({ length: 28 }, (_, index) => {
-      const date = new Date(`${historyStartDate}T00:00:00`);
-      date.setDate(date.getDate() + index);
-      return date.getDay() === weekday;
-    }).filter(Boolean).length;
-    for (const hour of slotHours) {
-      const count = observedBookings.filter((booking) =>
-        new Date(`${booking.date}T00:00:00`).getDay() === weekday && Number(booking.startHour) === hour,
-      ).length;
-      const periodCapacity = weekdayDates * settings.sections.length;
-      opportunities.push({
-        weekday,
-        hour,
-        count,
-        utilization: periodCapacity ? count / periodCapacity : 0,
-      });
-    }
-  }
-  const lowDemand = [...opportunities].sort((a, b) => a.utilization - b.utilization).slice(0, 3);
-  const highDemand = [...opportunities].filter((period) => period.count > 0)
-    .sort((a, b) => b.utilization - a.utilization).slice(0, 2);
-  const formatOpportunity = ({ weekday, hour }) => {
-    const dayLabel = new Intl.DateTimeFormat('en-IN', { weekday: 'long' }).format(new Date(2024, 0, 7 + weekday));
-    return `${dayLabel} ${formatHour(hour)}–${formatHour(hour + settings.durationHours)}`;
-  };
+    .slice(0, 4);
 
-  async function getAiRecommendations() {
+  async function getAiRecommendation() {
+    if (aiRequestRef.current) return;
+    const controller = new AbortController();
+    aiRequestRef.current = controller;
     setAiLoading(true);
     setAiError('');
     try {
-      const response = await fetch('/api/ai/owner-recommendations', { headers: authHeaders() });
+      const response = await fetch('/api/ai/owner-recommendations', {
+        headers: authHeaders(),
+        signal: controller.signal,
+      });
       const result = await response.json();
       if (!response.ok) throw new Error(result.message || 'Could not load AI recommendations.');
-      if (!Array.isArray(result.recommendations) || result.recommendations.length < 3) {
+      const first = Array.isArray(result.recommendations) ? result.recommendations[0] : null;
+      if (!first || typeof first.title !== 'string' || typeof first.reason !== 'string' || typeof first.action !== 'string') {
         throw new Error('AI recommendations could not be displayed. Please try again.');
       }
-      setAiRecommendations(result.recommendations);
+      if (aiRequestRef.current === controller) setAiRecommendation(first);
     } catch (error) {
-      setAiError(error.message || 'AI recommendations are temporarily unavailable.');
+      if (!controller.signal.aborted && aiRequestRef.current === controller) {
+        setAiError(error.message || 'AI recommendations are temporarily unavailable.');
+      }
     } finally {
-      setAiLoading(false);
+      if (aiRequestRef.current === controller) {
+        aiRequestRef.current = null;
+        setAiLoading(false);
+      }
     }
   }
 
+  useEffect(() => {
+    void getAiRecommendation();
+    return () => {
+      aiRequestRef.current?.abort();
+      aiRequestRef.current = null;
+    };
+  }, []);
+
   return (
     <div className="owner-page-content">
-      <section className="owner-metric-grid owner-primary-metrics" aria-label="Key turf metrics">
+      <section className="owner-business-summary" aria-label="Today's business summary">
         {metrics.map((metric) => (
-          <article className="owner-metric" key={metric.label}>
+          <article className="owner-business-summary-item" key={metric.label}>
             <span>{metric.label}</span>
             <strong>{metric.value}</strong>
-            <small>{metric.note}</small>
           </article>
         ))}
       </section>
 
-      <section className="owner-metric-grid owner-secondary-metrics" aria-label="Revenue and total bookings">
-        {secondaryMetrics.map((metric) => (
-          <article className="owner-metric" key={metric.label}>
-            <span>{metric.label}</span>
-            <strong>{metric.value}</strong>
-            <small>{metric.note}</small>
+      <section className="owner-turfcast-insight" aria-labelledby="owner-turfcast-insight-title" aria-live="polite">
+        <div className="owner-turfcast-insight-heading">
+          <div className="owner-turfcast-insight-title">
+            <Sparkles size={17} />
+            <h3 id="owner-turfcast-insight-title">TurfCast Insight</h3>
+          </div>
+          <button
+            className="owner-insight-refresh"
+            type="button"
+            onClick={() => void getAiRecommendation()}
+            disabled={aiLoading}
+            aria-label="Refresh TurfCast Insight"
+            title="Refresh insight"
+          >
+            <RefreshCw size={16} className={aiLoading ? 'spinning' : ''} />
+          </button>
+        </div>
+        {aiLoading && <p className="owner-turfcast-insight-status">Analyzing your booking data…</p>}
+        {aiError && (
+          <div className="owner-turfcast-insight-error" role="alert">
+            <span>{aiError}</span>
+            <button type="button" onClick={() => void getAiRecommendation()} disabled={aiLoading}>Retry</button>
+          </div>
+        )}
+        {!aiLoading && !aiError && aiRecommendation && (
+          <article className="owner-turfcast-insight-content">
+            <h4>{aiRecommendation.title}</h4>
+            <p>{aiRecommendation.reason}</p>
+            <strong>Try this: {aiRecommendation.action}</strong>
           </article>
-        ))}
+        )}
+        <p className="owner-turfcast-insight-note">AI suggestions are advisory. You stay in control.</p>
       </section>
-
       <OwnerAttentionBookings
         bookings={attentionBookings}
+        onOpenBookings={onOpenBookings}
         onViewBooking={onViewBooking}
         onMarkPaid={onMarkPaid}
         onCancelBooking={onCancelBooking}
       />
-      <OwnerBookingOpportunities
-        hasHistory={observedBookings.length > 0}
-        lowDemand={lowDemand}
-        highDemand={highDemand}
-        formatPeriod={formatOpportunity}
-      />
-      <section className="owner-panel owner-ai-recommendations" aria-labelledby="owner-ai-recommendations-title">
-        <div className="owner-panel-heading">
-          <div>
-            <h3 id="owner-ai-recommendations-title">AI Business Recommendations</h3>
-            <p>Practical ideas based on your turf booking data.</p>
-          </div>
-          <button className="primary-button" type="button" onClick={getAiRecommendations} disabled={aiLoading}>
-            <Sparkles size={16} />
-            {aiLoading ? 'Analyzing...' : 'Get AI Recommendations'}
-          </button>
-        </div>
-        <p className="owner-ai-note">AI suggestions are advisory. You stay in control.</p>
-        {aiError && <p className="owner-ai-error" role="alert">{aiError}</p>}
-        {aiRecommendations.length > 0 && (
-          <div className="owner-ai-list" aria-live="polite">
-            {aiRecommendations.map((recommendation, index) => (
-              <article className="owner-ai-item" key={`${recommendation.title}-${index}`}>
-                <h4>{recommendation.title}</h4>
-                <p>{recommendation.reason}</p>
-                <strong>Recommended action</strong>
-                <p>{recommendation.action}</p>
-              </article>
-            ))}
-          </div>
-        )}
-      </section>
-      <button className="owner-inline-link" type="button" onClick={onOpenBookings}>Open booking management <ArrowRight size={16} /></button>
     </div>
   );
 }
 
-function OwnerAttentionBookings({ bookings, onViewBooking, onMarkPaid, onCancelBooking }) {
+function OwnerAttentionBookings({ bookings, onOpenBookings, onViewBooking, onMarkPaid, onCancelBooking }) {
+  if (!bookings.length) {
+    return (
+      <p className="owner-attention-empty">
+        No upcoming unpaid bookings need attention.
+        <button type="button" onClick={onOpenBookings}>Manage bookings</button>
+      </p>
+    );
+  }
   return (
     <section className="owner-panel owner-attention-panel">
       <div className="owner-panel-heading">
-        <div><h3>Bookings needing attention</h3><p>Upcoming reservations with payment still due.</p></div>
+        <div><h3>Upcoming unpaid bookings</h3></div>
         <span>{bookings.length}</span>
       </div>
-      {bookings.length ? bookings.map((booking) => (
+      {bookings.map((booking) => (
         <article className="owner-attention-row" key={booking.id}>
           <div className="owner-attention-student">
             <strong>{booking.playerName}</strong>
@@ -1510,37 +1488,7 @@ function OwnerAttentionBookings({ bookings, onViewBooking, onMarkPaid, onCancelB
             <button className="owner-action-button danger" type="button" onClick={() => onCancelBooking(booking.id)} aria-label={`Cancel ${booking.playerName}'s booking`}><Trash2 size={16} /></button>
           </div>
         </article>
-      )) : <p className="owner-empty-note">No upcoming unpaid bookings.</p>}
-    </section>
-  );
-}
-
-function OwnerBookingOpportunities({ hasHistory, lowDemand, highDemand, formatPeriod }) {
-  return (
-    <section className="owner-panel owner-opportunities-panel">
-      <div className="owner-panel-heading">
-        <div><h3>Booking opportunities</h3><p>Utilization patterns from the last 28 days of booking records.</p></div>
-      </div>
-      {hasHistory ? <div className="owner-opportunity-grid">
-        <div>
-          <h4>Lower utilization</h4>
-          {lowDemand.map((period) => (
-            <div className="owner-opportunity-row" key={`low-${period.weekday}-${period.hour}`}>
-              <span>{formatPeriod(period)}</span>
-              <strong>{period.count === 0 ? 'No bookings' : 'Low demand'}</strong>
-            </div>
-          ))}
-        </div>
-        <div>
-          <h4>Highly booked</h4>
-          {highDemand.length ? highDemand.map((period) => (
-            <div className="owner-opportunity-row" key={`high-${period.weekday}-${period.hour}`}>
-              <span>{formatPeriod(period)}</span>
-              <strong>{period.utilization >= 0.5 ? 'High demand' : 'Booked'}</strong>
-            </div>
-          )) : <p className="owner-empty-note">No highly booked periods in this range.</p>}
-        </div>
-      </div> : <p className="owner-empty-note">Booking opportunities will appear after booking activity is recorded.</p>}
+      ))}
     </section>
   );
 }
@@ -1607,6 +1555,10 @@ function OwnerPricing({
   const [defaultError, setDefaultError] = useState('');
   const [slotError, setSlotError] = useState('');
   const [notice, setNotice] = useState('');
+  const [advisor, setAdvisor] = useState(null);
+  const [advisorLoading, setAdvisorLoading] = useState(false);
+  const [advisorError, setAdvisorError] = useState('');
+  const [advisorRefresh, setAdvisorRefresh] = useState(0);
 
   const selectedOverride = activeSlotPrice(priceOverrides, slotDate, section, Number(startHour));
   const upcomingOverrides = priceOverrides
@@ -1622,6 +1574,66 @@ function OwnerPricing({
     setSlotPrice(String(selectedOverride?.price ?? settings.price));
     setPriceType(selectedOverride?.type ?? 'manual');
   }, [selectedOverride?.id, selectedOverride?.price, selectedOverride?.type, settings.price]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let current = true;
+    if (
+      !section ||
+      !settings.sections.includes(section) ||
+      startHour === '' ||
+      !slots.includes(Number(startHour)) ||
+      !isFutureBookingSlot(slotDate, Number(startHour))
+    ) {
+      setAdvisor(null);
+      setAdvisorError('');
+      setAdvisorLoading(false);
+      return () => controller.abort();
+    }
+    setAdvisor(null);
+    setAdvisorLoading(true);
+    setAdvisorError('');
+    const query = new URLSearchParams({
+      date: slotDate,
+      section,
+      hour: String(Number(startHour)),
+    });
+    fetch(`/api/price-suggestions?${query}`, {
+      headers: authHeaders(),
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.message || 'Could not load price advice.');
+        if (!Number.isSafeInteger(result.suggestedPrice) || !result.demand || !result.weather) {
+          throw new Error('The price advisor returned an incomplete response.');
+        }
+        if (current) setAdvisor(result);
+      })
+      .catch((error) => {
+        if (current && !controller.signal.aborted) {
+          setAdvisorError(error.message || 'Price advice is temporarily unavailable.');
+        }
+      })
+      .finally(() => {
+        if (current) setAdvisorLoading(false);
+      });
+    return () => {
+      current = false;
+      controller.abort();
+    };
+  }, [
+    slotDate,
+    section,
+    startHour,
+    settings.price,
+    settings.sections,
+    settings.bookingWindowDays,
+    settings.maintenanceDates,
+    settings.turfLocation,
+    slots,
+    advisorRefresh,
+  ]);
 
   async function saveDefault(event) {
     event.preventDefault();
@@ -1762,8 +1774,48 @@ function OwnerPricing({
             {selectedOverride && <button className="ghost-button" type="button" onClick={resetSelectedOverride} disabled={savingSlot}>Reset to default</button>}
           </div>
         </form>
+        <aside className="owner-price-advisor" aria-labelledby="owner-price-advisor-title" aria-live="polite">
+          <div className="owner-price-advisor-heading">
+            <div><h4 id="owner-price-advisor-title">Smart Price Advisor</h4><span>{slotDate ? formatDate(slotDate) : 'Choose a date'} · {section} · {formatHour(Number(startHour))}</span></div>
+            <button
+              className="owner-insight-refresh"
+              type="button"
+              onClick={() => setAdvisorRefresh((current) => current + 1)}
+              disabled={advisorLoading || !dateSlots.includes(Number(startHour))}
+              aria-label="Refresh price advice"
+              title="Refresh price advice"
+            ><RefreshCw size={15} className={advisorLoading ? 'spinning' : ''} /></button>
+          </div>
+          {advisorLoading && <p className="owner-price-advisor-status">Checking comparable booking history…</p>}
+          {advisorError && <p className="owner-price-advisor-error" role="alert">{advisorError}</p>}
+          {advisor && (
+            <>
+              <div className="owner-price-advisor-facts">
+                <p><span>Weather</span><strong>{advisor.weather.available
+                  ? `${advisor.weather.risk} rain risk · ${advisor.weather.probability}% precipitation`
+                  : 'Live weather unavailable'}</strong></p>
+                <p><span>Demand</span><strong>{advisor.demand.historySufficient
+                  ? `${advisor.demand.level[0].toUpperCase()}${advisor.demand.level.slice(1)} · ${advisor.demand.score}%`
+                  : 'Limited booking history'}</strong></p>
+                <p><span>Suggested price</span><strong>{currency(advisor.suggestedPrice)}</strong></p>
+              </div>
+              {!advisor.weather.available && <p className="owner-price-advisor-weather-note">{advisor.weather.message} Weather was not included in this estimate.</p>}
+              <p className="owner-price-advisor-explanation">{advisor.explanation}</p>
+              <button
+                className="ghost-button"
+                type="button"
+                onClick={() => {
+                  setSlotPrice(String(advisor.suggestedPrice));
+                  setSlotError('');
+                  setNotice('Suggested price filled in. Review it and save when ready.');
+                }}
+                disabled={savingSlot}
+              >Use suggested price</button>
+            </>
+          )}
+        </aside>
         <div className="owner-current-slot-price" aria-live="polite">
-          <span>{formatDate(slotDate)} · {section} · {formatHour(Number(startHour))}–{formatHour(Number(startHour) + settings.durationHours)}</span>
+          <span>{slotDate ? formatDate(slotDate) : 'Choose a date'} · {section} · {formatHour(Number(startHour))}–{formatHour(Number(startHour) + settings.durationHours)}</span>
           <strong>Current: {currency(selectedOverride?.price ?? settings.price)}</strong>
           <small>Price type: {selectedOverride?.type === 'promotion' ? 'Special Price' : selectedOverride ? 'Manual' : 'Default'}</small>
         </div>
@@ -1813,6 +1865,7 @@ function OwnerPricing({
 
 function OwnerTurfSettings({ settings, onEdit }) {
   const details = [
+    ['Turf city / location', settings.turfLocation || 'Not configured'],
     ['Base price', currency(settings.price)],
     ['Slot duration', `${settings.durationHours} hours`],
     ['Opening hours', `${formatHour(settings.openHour)}–${formatHour(settings.closeHour)}`],
@@ -1850,11 +1903,26 @@ function OwnerProfile({ user, onEdit }) {
 
 function OwnerAnalytics({ bookings, settings }) {
   const today = new Date(`${toDateInput(new Date())}T00:00:00`);
+  const todayValue = toDateInput(today);
+  const weekStart = new Date(today);
+  weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7));
+  const weekStartValue = toDateInput(weekStart);
+  const monthStartValue = `${todayValue.slice(0, 7)}-01`;
+  const confirmedBookings = bookings.filter((booking) =>
+    !booking.cancelledAt && booking.paymentStatus !== 'refunded',
+  );
+  const paidBookings = confirmedBookings.filter((booking) => booking.paymentStatus === 'paid');
+  const weeklyRevenue = paidBookings
+    .filter((booking) => booking.date >= weekStartValue && booking.date <= todayValue)
+    .reduce((sum, booking) => sum + Number(booking.price || 0), 0);
+  const monthlyRevenue = paidBookings
+    .filter((booking) => booking.date >= monthStartValue && booking.date <= todayValue)
+    .reduce((sum, booking) => sum + Number(booking.price || 0), 0);
   const days = Array.from({ length: 7 }, (_, index) => {
     const day = new Date(today);
     day.setDate(day.getDate() - (6 - index));
     const date = toDateInput(day);
-    const dayBookings = bookings.filter((booking) => booking.date === date);
+    const dayBookings = confirmedBookings.filter((booking) => booking.date === date);
     return {
       date,
       label: new Intl.DateTimeFormat('en-IN', { weekday: 'short' }).format(day),
@@ -1862,8 +1930,8 @@ function OwnerAnalytics({ bookings, settings }) {
       revenue: dayBookings.filter((booking) => booking.paymentStatus === 'paid').reduce((sum, booking) => sum + Number(booking.price || 0), 0),
     };
   });
-  const sevenDayBookings = bookings.filter((booking) => booking.date >= days[0].date && booking.date <= toDateInput(today));
-  const bySport = bookings.reduce((totals, booking) => {
+  const sevenDayBookings = confirmedBookings.filter((booking) => booking.date >= days[0].date && booking.date <= todayValue);
+  const bySport = confirmedBookings.reduce((totals, booking) => {
     totals[booking.sport] = (totals[booking.sport] || 0) + 1;
     return totals;
   }, {});
@@ -1877,6 +1945,11 @@ function OwnerAnalytics({ bookings, settings }) {
   const leastUsed = timeData.reduce((least, period) => period.count < least.count ? period : least, { hour: null, count: Infinity });
   return (
     <div className="owner-analytics-page">
+      <section className="owner-analytics-summary" aria-label="Revenue and booking totals">
+        <article><span>This week's collected revenue</span><strong>{currency(weeklyRevenue)}</strong></article>
+        <article><span>This month's collected revenue</span><strong>{currency(monthlyRevenue)}</strong></article>
+        <article><span>Confirmed bookings · all time</span><strong>{confirmedBookings.length}</strong></article>
+      </section>
       <div className="owner-chart-grid">
         <section className="owner-panel owner-chart-panel">
           <div className="owner-panel-heading"><div><h3>Bookings by day</h3><p>Scheduled over the last seven days.</p></div></div>
@@ -2095,6 +2168,7 @@ function SettingsModal({ settings, onClose, onSave }) {
     const safeSettings = {
       ...draft,
       price: Math.max(1, Number(draft.price)),
+      turfLocation: String(draft.turfLocation || '').trim().slice(0, 120),
       durationHours: Math.max(1, Number(draft.durationHours)),
       openHour: Math.max(0, Math.min(23, Number(draft.openHour))),
       closeHour: Math.max(1, Math.min(24, Number(draft.closeHour))),
@@ -2130,6 +2204,16 @@ function SettingsModal({ settings, onClose, onSave }) {
         </div>
 
         <div className="form-grid">
+          <label className="settings-location-field">
+            Turf city / location
+            <input
+              type="text"
+              maxLength="120"
+              placeholder="e.g. Dharashiv, Maharashtra"
+              value={draft.turfLocation || ''}
+              onChange={(event) => setDraft((current) => ({ ...current, turfLocation: event.target.value }))}
+            />
+          </label>
           <label>
             Price
             <input type="number" min="1" value={draft.price} onChange={(event) => setNumber('price', event.target.value)} />

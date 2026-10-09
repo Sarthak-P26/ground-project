@@ -9,7 +9,7 @@ import nodemailer from 'nodemailer';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express(); const PORT = process.env.PORT || 4173;
-const defaults = { settings: { price: 600, durationHours: 3, openHour: 6, closeHour: 21, sections: ['Section A', 'Section B', 'Section C', 'Section D'], sports: ['Cricket', 'Football'], bookingWindowDays: 14, maxActiveBookingsPerPhone: 2, maintenanceDates: [] }, priceOverrides: [], bookings: [], users: [] };
+const defaults = { settings: { price: 600, durationHours: 3, openHour: 6, closeHour: 21, sections: ['Section A', 'Section B', 'Section C', 'Section D'], sports: ['Cricket', 'Football'], bookingWindowDays: 14, maxActiveBookingsPerPhone: 2, maintenanceDates: [], turfLocation: '' }, priceOverrides: [], bookings: [], users: [] };
 const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');
 const databaseUrl = process.env.FIREBASE_DATABASE_URL;
 const hasServiceAccount = Boolean(databaseUrl && process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && privateKey);
@@ -135,9 +135,77 @@ async function readStore() {
     users: [...mergedUsers.values()],
   }, fileStore[rolesNeedMigration] || firebaseUsers.some((user) => !['student', 'owner'].includes(user.role)));
 }
-const rainyPattern = (date, hour = 18) => { const d = new Date(`${date}T${String(hour).padStart(2, '0')}:00:00`).getTime() / 86400000, p = Math.max(8, Math.min(92, Math.round(36 + (Math.sin(d * .74) + Math.sin(d * .21)) * 25))); return { probability: p, risk: p >= 65 ? 'High' : p >= 35 ? 'Medium' : 'Low', source: 'demo forecast' }; };
-async function weatherRisk(date, hour) { if (!process.env.OPENWEATHER_API_KEY) return rainyPattern(date, hour); try { const r = await fetch(`https://api.openweathermap.org/data/2.5/forecast?q=Delhi,IN&appid=${process.env.OPENWEATHER_API_KEY}`), j = await r.json(), target = new Date(`${date}T${String(hour).padStart(2, '0')}:00:00`).getTime(), items = j.list || [], item = items.filter((x) => x.dt_txt?.startsWith(date)).sort((a, b) => Math.abs(new Date(a.dt_txt).getTime() - target) - Math.abs(new Date(b.dt_txt).getTime() - target))[0]; if (!item) return rainyPattern(date, hour); const p = Math.round((item.pop || 0) * 100); return { probability: p, risk: p >= 65 ? 'High' : p >= 35 ? 'Medium' : 'Low', source: 'OpenWeatherMap' }; } catch { return rainyPattern(date, hour); } }
-function demandScore(bookings, date, hour, section, risk) { const target = new Date(`${date}T00:00:00`); const weighted = bookings.filter((b) => b.section === section && Number(b.startHour) === Number(hour) && new Date(`${b.date}T00:00:00`).getDay() === target.getDay() && !b.cancelledAt).reduce((n, b) => n + Math.max(.2, 1 - Math.max(0, (target - new Date(`${b.date}T00:00:00`)) / 86400000) / 220), 0); return Math.min(100, Math.round(weighted * 16 * (risk === 'High' ? .65 : risk === 'Medium' ? .82 : 1))); }
+function unavailableWeather(status, message) {
+  return { available: false, status, message };
+}
+async function weatherRisk(date, hour, location) {
+  const apiKey = process.env.OPENWEATHER_API_KEY;
+  if (!apiKey) return unavailableWeather('not_configured', 'Live weather is unavailable because the server weather provider is not configured.');
+  if (typeof location !== 'string' || !location.trim()) {
+    return unavailableWeather('location_missing', 'Add the turf city or location in Turf Settings to include live weather.');
+  }
+  try {
+    const url = new URL('https://api.openweathermap.org/data/2.5/forecast');
+    url.searchParams.set('q', location.trim());
+    url.searchParams.set('appid', apiKey);
+    url.searchParams.set('units', 'metric');
+    const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    let data = {};
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
+    }
+    if (!response.ok) {
+      const status = response.status === 401 || response.status === 403
+        ? 'provider_credentials'
+        : response.status === 404
+          ? 'location_not_found'
+          : response.status === 429
+            ? 'provider_limit'
+            : 'provider_error';
+      const message = status === 'provider_credentials'
+        ? 'Live weather is unavailable because the weather provider rejected its server credentials.'
+        : status === 'location_not_found'
+          ? 'Live weather is unavailable because the saved turf location was not found.'
+          : status === 'provider_limit'
+            ? 'Live weather is temporarily unavailable because the weather provider is rate-limiting requests.'
+            : 'Live weather is temporarily unavailable from the weather provider.';
+      console.warn('[Weather advisor]', JSON.stringify({ status, httpStatus: response.status }));
+      return unavailableWeather(status, message);
+    }
+    const timezoneOffset = Number(data.city?.timezone);
+    if (!Number.isFinite(timezoneOffset) || !Array.isArray(data.list)) {
+      return unavailableWeather('forecast_unavailable', 'The weather provider did not return a usable forecast for this location.');
+    }
+    const [year, month, day] = date.split('-').map(Number);
+    const target = Date.UTC(year, month - 1, day, Number(hour)) - timezoneOffset * 1000;
+    const item = data.list
+      .filter((entry) => Number.isFinite(Number(entry.dt)))
+      .sort((a, b) => Math.abs(Number(a.dt) * 1000 - target) - Math.abs(Number(b.dt) * 1000 - target))[0];
+    if (!item || Math.abs(Number(item.dt) * 1000 - target) > 90 * 60 * 1000 || !Number.isFinite(Number(item.pop))) {
+      return unavailableWeather('forecast_unavailable', 'The weather provider has no forecast for this location and selected time.');
+    }
+    const probability = Math.max(0, Math.min(100, Math.round(Number(item.pop) * 100)));
+    return {
+      available: true,
+      status: 'available',
+      probability,
+      risk: probability >= 65 ? 'High' : probability >= 35 ? 'Medium' : 'Low',
+      source: 'OpenWeatherMap',
+    };
+  } catch (error) {
+    const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError';
+    console.warn('[Weather advisor]', JSON.stringify({ status: timedOut ? 'timeout' : 'network_error' }));
+    return unavailableWeather(
+      timedOut ? 'timeout' : 'network_error',
+      timedOut
+        ? 'Live weather took too long to load and was not included.'
+        : 'Live weather could not be reached and was not included.',
+    );
+  }
+}
+function demandScore(bookings, date, hour, section, risk) { const target = new Date(`${date}T00:00:00`); const weighted = bookings.filter((b) => b.section === section && Number(b.startHour) === Number(hour) && new Date(`${b.date}T00:00:00`).getDay() === target.getDay() && !b.cancelledAt && b.paymentStatus !== 'refunded').reduce((n, b) => n + Math.max(.2, 1 - Math.max(0, (target - new Date(`${b.date}T00:00:00`)) / 86400000) / 220), 0); const weatherFactor = risk === 'High' ? .65 : risk === 'Medium' ? .82 : 1; return Math.min(100, Math.round(weighted * 16 * weatherFactor)); }
 async function writeFileStore(store) {
   await fs.mkdir(path.dirname(storePath), { recursive: true });
   const temporaryPath = `${storePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
@@ -340,6 +408,7 @@ app.get('/api/ai/owner-recommendations', route(async (req, res) => {
     'You are a practical business analyst for a single college turf booking business.',
     'Use only the supplied TurfCast business data. Do not invent bookings, prices, weather, or other facts.',
     'Give 3 to 5 concise, actionable recommendations focused on increasing bookings and utilization.',
+    'Order recommendations from the most useful, actionable, and directly supported by the supplied data to the least useful. If booking history is sparse, say so and avoid claiming established trends.',
     'Pricing suggestions are optional recommendations only; never imply that you changed or will automatically change a price.',
     'Do not recommend weather-based pricing. Do not invent causes when the data does not establish them.',
     'Return only JSON in this exact shape: {"recommendations":[{"title":"...","reason":"...","action":"..."}]}.',
@@ -486,7 +555,10 @@ app.get('/api/ai/owner-recommendations', route(async (req, res) => {
   }
   res.json({ recommendations });
 }));
-app.get('/api/weather-risk', route(async (req, res) => res.json(await weatherRisk(String(req.query.date || today()), Number(req.query.hour || 18)))));
+app.get('/api/weather-risk', route(async (req, res) => {
+  const store = await readStore();
+  res.json(await weatherRisk(String(req.query.date || today()), Number(req.query.hour || 18), store.settings.turfLocation));
+}));
 app.get('/api/forecast', route(async (req, res) => {
   const store = await readStore();
   if (authenticatedUser(store, req)?.role !== 'owner') {
@@ -498,15 +570,16 @@ app.get('/api/forecast', route(async (req, res) => {
     const dateValue = new Date();
     dateValue.setDate(dateValue.getDate() + day);
     const date = dateValue.toISOString().slice(0, 10);
-    const risk = await weatherRisk(date, 18);
+    const weather = await weatherRisk(date, 18, store.settings.turfLocation);
     const values = store.settings.sections.flatMap((section) =>
-      slots(store.settings).map((hour) => demandScore([...historical, ...store.bookings], date, hour, section, risk.risk)),
+      slots(store.settings).map((hour) => demandScore([...historical, ...store.bookings], date, hour, section, weather.available ? weather.risk : null)),
     );
     data.push({
       date,
       label: dateValue.toLocaleDateString('en-IN', { weekday: 'short' }),
       demand: Math.round(values.reduce((a, b) => a + b, 0) / Math.max(values.length, 1)),
-      risk: risk.risk,
+      risk: weather.available ? weather.risk : 'Unavailable',
+      weather,
     });
   }
   res.json(data);
@@ -516,25 +589,80 @@ app.get('/api/price-suggestions', route(async (req, res) => {
   if (authenticatedUser(store, req)?.role !== 'owner') {
     return res.status(403).json({ message: 'Owner access is required to view pricing suggestions.' });
   }
-  const date = String(req.query.date || today());
-  const historical = await readHistoricalBookings();
-  const all = [...historical, ...store.bookings];
-  const result = {};
-  for (const section of store.settings.sections) {
-    const scores = [];
-    for (const hour of slots(store.settings)) {
-      const risk = await weatherRisk(date, hour);
-      scores.push(demandScore(all, date, hour, section, risk.risk));
-    }
-    const demand = Math.round(scores.reduce((a, b) => a + b, 0) / Math.max(scores.length, 1));
-    const multiplier = demand >= 70 ? 1.18 : demand <= 30 ? .9 : 1;
-    result[section] = {
-      demand,
-      suggestedPrice: Math.round(store.settings.price * multiplier),
-      recommendation: multiplier > 1 ? 'High demand' : multiplier < 1 ? 'Low demand' : 'Base price',
-    };
+  const date = String(req.query.date || '');
+  const section = String(req.query.section || '');
+  const hour = Number(req.query.hour);
+  const currentDate = today();
+  const lastBookingDate = new Date(`${currentDate}T00:00:00.000Z`);
+  lastBookingDate.setUTCDate(lastBookingDate.getUTCDate() + Number(store.settings.bookingWindowDays));
+  if (
+    !isValidDateValue(date) ||
+    !store.settings.sections.includes(section) ||
+    !Number.isSafeInteger(hour) ||
+    !slots(store.settings).includes(hour) ||
+    date < currentDate ||
+    date > lastBookingDate.toISOString().slice(0, 10) ||
+    bookingStartTimestamp(date, hour) <= Date.now()
+  ) {
+    return res.status(400).json({ message: 'Choose a future date, section, and time within the booking window.' });
   }
-  res.json(result);
+  if (store.settings.maintenanceDates.includes(date)) {
+    return res.status(400).json({ message: 'Price advice is unavailable for a turf maintenance date.' });
+  }
+  const alreadyBooked = store.bookings.some((booking) =>
+    booking.date === date &&
+    booking.section === section &&
+    Number(booking.startHour) === hour &&
+    !booking.cancelledAt &&
+    booking.paymentStatus !== 'refunded',
+  );
+  if (alreadyBooked) {
+    return res.status(409).json({ message: 'This section and time already have a booking.' });
+  }
+
+  const historical = await readHistoricalBookings();
+  const comparableDays = new Set();
+  const targetWeekday = new Date(`${date}T00:00:00.000Z`).getUTCDay();
+  for (let offset = 1; offset <= 84; offset += 1) {
+    const priorDate = new Date(`${date}T00:00:00.000Z`);
+    priorDate.setUTCDate(priorDate.getUTCDate() - offset);
+    if (priorDate.getUTCDay() === targetWeekday) comparableDays.add(priorDate.toISOString().slice(0, 10));
+  }
+  const comparableBookings = [...historical, ...store.bookings].filter((booking) =>
+    comparableDays.has(booking.date) &&
+    booking.section === section &&
+    Number(booking.startHour) === hour &&
+    !booking.cancelledAt &&
+    booking.paymentStatus !== 'refunded',
+  );
+  const bookedDates = new Set(comparableBookings.map((booking) => booking.date));
+  const demandScore = comparableDays.size
+    ? Math.round((bookedDates.size / comparableDays.size) * 100)
+    : 0;
+  const historySufficient = bookedDates.size >= 4;
+  const demandLevel = demandScore >= 60 ? 'high' : demandScore < 25 ? 'low' : 'moderate';
+  const basePrice = store.settings.price;
+  const multiplier = !historySufficient ? 1 : demandLevel === 'high' ? 1.1 : demandLevel === 'low' ? 0.9 : 1;
+  const suggestedPrice = Math.max(1, Math.min(MAX_PRICE_INR, Math.round((basePrice * multiplier) / 50) * 50));
+  const weather = await weatherRisk(date, hour, store.settings.turfLocation);
+  const demandExplanation = !historySufficient
+    ? `Only ${bookedDates.size} comparable bookings were found in the last 12 weeks. The default price is the safer starting point until more slot history is available.`
+    : `${bookedDates.size} of ${comparableDays.size} comparable ${new Intl.DateTimeFormat('en-IN', { weekday: 'long', timeZone: 'UTC' }).format(new Date(`${date}T00:00:00.000Z`))} slots in this section and time were booked in the last 12 weeks.`;
+  res.json({
+    date,
+    section,
+    hour,
+    suggestedPrice,
+    demand: {
+      level: historySufficient ? demandLevel : 'limited',
+      score: historySufficient ? demandScore : null,
+      comparableBookings: bookedDates.size,
+      comparableOpportunities: comparableDays.size,
+      historySufficient,
+    },
+    explanation: `${demandExplanation} The suggested price is based on comparable booking demand only; weather does not change it.`,
+    weather,
+  });
 }));
 app.post('/api/auth/signup', route(async (req, res) => {
   const result = await withStoreLock(async () => {
@@ -724,6 +852,9 @@ app.put('/api/settings', route(async (req, res) => {
     current.settings = {
       ...old,
       ...settingsInput,
+      turfLocation: typeof settingsInput.turfLocation === 'string'
+        ? settingsInput.turfLocation.trim().slice(0, 120)
+        : old.turfLocation || '',
       price,
       durationHours: Math.max(1, Number(settingsInput.durationHours)),
       openHour: Math.max(0, Math.min(23, Number(settingsInput.openHour))),
