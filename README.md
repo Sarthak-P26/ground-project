@@ -89,6 +89,12 @@ The student-only floating assistant uses the same server-side Gemini configurati
 for general questions. Availability, booking rules, current prices, a student's own
 booking summary, and forecast facts are answered locally from validated server data;
 these answers remain available when Gemini quota or credentials are unavailable.
+Slot recommendations are also based locally on currently available sections, the
+selected date, and applicable prices. Comparisons about quieter times use recent
+booking history only when there is enough evidence; otherwise the assistant says
+that it cannot identify an objectively quieter or best time. General sports and
+fitness questions remain general Gemini questions and receive practical advice
+without claims about the student's ability or live conditions.
 Student questions never grant access to another student's booking details, and the
 assistant cannot make or change bookings.
 
