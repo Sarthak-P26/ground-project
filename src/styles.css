@@ -3655,9 +3655,28 @@ textarea:focus {
 }
 
 .owner-turfcast-insight-content h4 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 0 0 4px;
   color: var(--owner-ink);
   font-size: 0.88rem;
+}
+
+.owner-insight-source {
+  padding: 3px 7px;
+  border-radius: 999px;
+  color: #4e6556;
+  background: #eef3ef;
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.owner-insight-source.gemini {
+  color: #246345;
+  background: #e6f4ea;
 }
 
 .owner-turfcast-insight-content p {
@@ -3688,6 +3707,33 @@ textarea:focus {
   padding: 8px 0;
   color: #a23c35;
   font-size: 0.8rem;
+}
+
+.owner-turfcast-insight-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 8px 0 0;
+  padding: 9px 10px;
+  border: 1px solid #dce9df;
+  border-radius: 10px;
+  color: #536559;
+  background: #f5faf6;
+  font-size: 0.76rem;
+  line-height: 1.4;
+}
+
+.owner-turfcast-insight-fallback button {
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  border: 1px solid #d1e2d6;
+  border-radius: 8px;
+  color: #245b3d;
+  background: #fff;
+  font: inherit;
+  font-weight: 750;
+  cursor: pointer;
 }
 
 .owner-turfcast-insight-error button {

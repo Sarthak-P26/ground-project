@@ -1594,10 +1594,61 @@ function OwnerExperience({
   );
 }
 
+function buildLocalDashboardRecommendation(bookings, settings) {
+  const confirmed = bookings.filter((booking) =>
+    !booking.cancelledAt && booking.paymentStatus !== 'refunded',
+  );
+  const unpaid = confirmed.filter((booking) => booking.paymentStatus === 'unpaid');
+  const unpaidAmount = unpaid.reduce((total, booking) => {
+    const price = Number(booking.price);
+    return total + (Number.isSafeInteger(price) && price > 0 ? price : 0);
+  }, 0);
+  const recent = confirmed.filter((booking) => {
+    const daysAgo = (Date.now() - new Date(`${booking.date}T00:00:00`).getTime()) / 86400000;
+    return daysAgo >= 0 && daysAgo < 28;
+  });
+  if (recent.length < 5) {
+    return {
+      title: 'Build a clearer booking picture',
+      reason: `There are ${recent.length} confirmed bookings in the last 28 days, which is a limited sample for comparing demand.`,
+      action: 'Keep tracking bookings over the next few weeks before making larger schedule or pricing changes.',
+    };
+  }
+  if (unpaid.length > 0 && unpaidAmount > 0) {
+    return {
+      title: 'Review unpaid bookings',
+      reason: `Current records show ${unpaid.length} unpaid bookings totaling ${unpaidAmount} INR.`,
+      action: 'Review those bookings in the existing payment controls and follow up as appropriate.',
+    };
+  }
+  const slotHours = makeTimeSlots(settings);
+  const capacity = 28 * settings.sections.length;
+  const slotUtilization = slotHours.map((hour) => {
+    const count = recent.filter((booking) => Number(booking.startHour) === hour).length;
+    return { hour, count, utilization: capacity ? Math.round((count / capacity) * 100) : 0 };
+  }).sort((a, b) => a.utilization - b.utilization);
+  const quietSlot = slotUtilization[0];
+  if (quietSlot && capacity > 0 && quietSlot.utilization < 20) {
+    return {
+      title: 'Review a quieter time slot',
+      reason: `${formatHour(quietSlot.hour)} had ${quietSlot.count} bookings and ${quietSlot.utilization}% utilization over the last 28 days.`,
+      action: 'Consider testing a time-limited promotion for this slot; review its results before making broader changes.',
+    };
+  }
+  return {
+    title: 'Keep monitoring booking patterns',
+    reason: `${recent.length} confirmed bookings were recorded in the last 28 days; current unpaid bookings total ${unpaidAmount} INR.`,
+    action: 'Review utilization and payment records regularly before changing prices or schedules.',
+  };
+}
+
 function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCancelBooking, onViewBooking }) {
-  const [aiRecommendation, setAiRecommendation] = useState(null);
+  const [aiRecommendation, setAiRecommendation] = useState(() => ({
+    ...buildLocalDashboardRecommendation(bookings, settings),
+    source: 'local',
+  }));
   const [aiLoading, setAiLoading] = useState(false);
-  const [aiError, setAiError] = useState('');
+  const [aiFallbackReason, setAiFallbackReason] = useState('');
   const aiRequestRef = useRef(null);
   const today = toDateInput(new Date());
   const confirmedBookings = bookings.filter((booking) =>
@@ -1625,19 +1676,19 @@ function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCanc
     .sort((a, b) => `${a.date}-${a.startHour}`.localeCompare(`${b.date}-${b.startHour}`))
     .slice(0, 4);
 
-  async function getAiRecommendation() {
+  async function getAiRecommendation(forceGemini = false) {
     if (aiRequestRef.current) return;
     const controller = new AbortController();
     let timedOut = false;
     aiRequestRef.current = controller;
     setAiLoading(true);
-    setAiError('');
+    setAiFallbackReason('');
     const timeout = window.setTimeout(() => {
       timedOut = true;
       controller.abort();
-    }, 11000);
+    }, 12000);
     try {
-      const response = await fetch('/api/ai/owner-recommendations', {
+      const response = await fetch(`/api/ai/owner-recommendations${forceGemini ? '?refresh=1' : ''}`, {
         headers: authHeaders(),
         signal: controller.signal,
       });
@@ -1647,12 +1698,19 @@ function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCanc
       if (!first || typeof first.title !== 'string' || typeof first.reason !== 'string' || typeof first.action !== 'string') {
         throw new Error('AI recommendations could not be displayed. Please try again.');
       }
-      if (aiRequestRef.current === controller) setAiRecommendation(first);
+      if (aiRequestRef.current === controller) {
+        setAiRecommendation({ ...first, source: result.source === 'gemini' ? 'gemini' : 'local' });
+        setAiFallbackReason(result.source === 'gemini' ? '' : result.fallbackReason || 'Gemini is unavailable. This local insight uses current booking data.');
+      }
     } catch (error) {
-      if (!controller.signal.aborted && aiRequestRef.current === controller) {
-        setAiError(error.message || 'AI recommendations are temporarily unavailable.');
-      } else if (timedOut && aiRequestRef.current === controller) {
-        setAiError('The recommendation request took too long. Your dashboard is still available; please retry.');
+      if (aiRequestRef.current === controller) {
+        setAiRecommendation({
+          ...buildLocalDashboardRecommendation(bookings, settings),
+          source: 'local',
+        });
+        setAiFallbackReason(timedOut
+          ? 'Gemini timed out. This local insight uses current booking data; you can explicitly retry Gemini.'
+          : error.message || 'Gemini is unavailable. This local insight uses current booking data.');
       }
     } finally {
       window.clearTimeout(timeout);
@@ -1693,24 +1751,24 @@ function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCanc
           <button
             className="owner-insight-refresh"
             type="button"
-            onClick={() => void getAiRecommendation()}
+            onClick={() => void getAiRecommendation(true)}
             disabled={aiLoading}
             aria-label="Refresh TurfCast Insight"
-            title="Refresh insight"
+            title="Try Gemini again"
           >
             <RefreshCw size={16} className={aiLoading ? 'spinning' : ''} />
           </button>
         </div>
-        {aiLoading && <p className="owner-turfcast-insight-status">Analyzing your booking data…</p>}
-        {aiError && (
-          <div className="owner-turfcast-insight-error" role="alert">
-            <span>{aiError}</span>
-            <button type="button" onClick={() => void getAiRecommendation()} disabled={aiLoading}>Retry</button>
+        {aiLoading && <p className="owner-turfcast-insight-status">Checking for a fresh Gemini recommendation…</p>}
+        {aiFallbackReason && (
+          <div className="owner-turfcast-insight-fallback" role="status">
+            <span>{aiFallbackReason}</span>
+            <button type="button" onClick={() => void getAiRecommendation(true)} disabled={aiLoading}>Try Gemini again</button>
           </div>
         )}
         {aiRecommendation && (
           <article className="owner-turfcast-insight-content">
-            <h4>{aiRecommendation.title}</h4>
+            <h4>{aiRecommendation.title}<span className={`owner-insight-source ${aiRecommendation.source}`}>{aiRecommendation.source === 'gemini' ? 'Gemini' : 'Local insight'}</span></h4>
             <p>{aiRecommendation.reason}</p>
             <strong>Try this: {aiRecommendation.action}</strong>
           </article>
@@ -1775,7 +1833,7 @@ function OwnerAssistantChat() {
     setLastFailedQuestion(question);
     const controller = new AbortController();
     requestRef.current = controller;
-    const timeout = window.setTimeout(() => controller.abort(), 16000);
+    const timeout = window.setTimeout(() => controller.abort(), 20000);
     try {
       const response = await fetch('/api/ai/owner-assistant', {
         method: 'POST',

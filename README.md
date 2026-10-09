@@ -65,6 +65,26 @@ commit `.env`. `APP_BASE_URL` should be the public URL users visit; it defaults 
 credentials are configured, password recovery will report that email is unavailable
 instead of implying that a message was sent.
 
+### Owner AI assistant and recommendations
+
+The owner-only floating TurfCast AI assistant and Dashboard recommendations use
+Gemini when `GEMINI_API_KEY` is configured in the project-root `.env` file. The server
+loads that file relative to `server.js`; non-empty deployment environment variables
+take precedence. A blank environment key does not mask a non-empty key in `.env`.
+Restart the server after changing AI configuration. Never commit `.env` or send the
+key through chat or source control.
+
+`GEMINI_MODEL` is optional. Leave it blank to select the first available
+`generateContent` model from `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`, and
+`gemini-2.5-flash-lite`. A configured override is used only if the API key lists it as
+available. Model availability and Gemini quota depend on the configured key and
+provider; they cannot be guaranteed. Dashboard recommendations fall back to a
+deterministic local insight based on current aggregate booking and payment records.
+The floating chat reports Gemini configuration, model, timeout, rate-limit, or quota
+errors clearly and does not fabricate an AI response when Gemini is unavailable.
+Retrying the chat is owner-triggered; the Dashboard retries Gemini only when its
+refresh control is explicitly selected.
+
 ### Weather data
 
 Set the turf city and state in Owner Settings to enable weather lookups. The backend

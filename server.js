@@ -1,13 +1,32 @@
 import express from 'express';
 import crypto from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import 'dotenv/config';
+import dotenv from 'dotenv';
 import admin from 'firebase-admin';
 import nodemailer from 'nodemailer';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const projectEnvPath = path.join(__dirname, '.env');
+dotenv.config({ path: projectEnvPath, override: false, quiet: true });
+let projectEnv = {};
+try {
+  projectEnv = dotenv.parse(readFileSync(projectEnvPath));
+} catch (error) {
+  if (error.code !== 'ENOENT') throw error;
+}
+if (!String(process.env.GEMINI_API_KEY || '').trim() && String(projectEnv.GEMINI_API_KEY || '').trim()) {
+  process.env.GEMINI_API_KEY = projectEnv.GEMINI_API_KEY.trim();
+}
+process.env.GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || '').trim();
+process.env.GEMINI_MODEL = String(process.env.GEMINI_MODEL || '').trim();
+const configuredGeminiModel = process.env.GEMINI_MODEL.replace(/^models\//, '');
+const logSafeConfiguredModel = /^[a-zA-Z0-9._-]+$/.test(configuredGeminiModel)
+  ? configuredGeminiModel
+  : configuredGeminiModel ? 'invalid-override' : 'auto: Flash-Lite';
+console.info(`[Gemini] configured=${Boolean(process.env.GEMINI_API_KEY)} model=${logSafeConfiguredModel}`);
 const app = express(); const PORT = process.env.PORT || 4173;
 const DEFAULT_TURF_LOCATION = 'Dharashiv, Maharashtra';
 const defaults = { settings: { price: 600, durationHours: 3, openHour: 6, closeHour: 21, sections: ['Section A', 'Section B', 'Section C', 'Section D'], sports: ['Cricket', 'Football'], bookingWindowDays: 14, maxActiveBookingsPerPhone: 2, maintenanceDates: [], turfLocation: DEFAULT_TURF_LOCATION }, priceOverrides: [], bookings: [], users: [] };
@@ -708,9 +727,11 @@ class GeminiServiceError extends Error {
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 const GEMINI_DEFAULT_MODELS = ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-2.5-flash-lite'];
 const GEMINI_MODEL_CACHE_MS = 5 * 60 * 1000;
+const GEMINI_MODEL_ERROR_CACHE_MS = 15 * 1000;
 const RECOMMENDATION_CACHE_MS = 90 * 1000;
-const geminiModelCache = { expiresAt: 0, names: [] };
+let geminiModelCache = { expiresAt: 0, keyHash: '', promise: null };
 const recommendationCache = new Map();
+const recommendationInflight = new Map();
 
 function geminiHttpError(status, errorBody = {}) {
   const googleError = errorBody.error || {};
@@ -719,7 +740,10 @@ function geminiHttpError(status, errorBody = {}) {
     return new GeminiServiceError(503, 'credentials', 'Gemini rejected the server credentials. Check GEMINI_API_KEY configuration.');
   }
   if (status === 429 || /quota|rate limit|resource_exhausted/.test(detail)) {
-    return new GeminiServiceError(429, 'quota', 'Gemini is at its request or usage limit. Please try again later.');
+    const exhausted = /per.day|daily|free_tier_requests|requests_per_day|tokens_per_day|daily limit/.test(detail);
+    return exhausted
+      ? new GeminiServiceError(429, 'quota_exhausted', 'Gemini quota is exhausted for now. TurfCast is showing a local insight; try Gemini again when quota is available.')
+      : new GeminiServiceError(429, 'rate_limit', 'Gemini is temporarily rate-limited. TurfCast is showing a local insight; wait briefly before trying Gemini again.');
   }
   if (status === 404) {
     return new GeminiServiceError(503, 'model', 'The configured Gemini model is unavailable. Set GEMINI_MODEL to a model that supports generateContent.');
@@ -734,40 +758,49 @@ function geminiHttpError(status, errorBody = {}) {
 }
 
 async function listGeminiModels(apiKey) {
-  if (geminiModelCache.expiresAt > Date.now()) return geminiModelCache.names;
-  let response;
-  try {
-    response = await fetch(`${GEMINI_API_BASE}/models?key=${encodeURIComponent(apiKey)}&pageSize=100`, {
-      signal: AbortSignal.timeout(3000),
-    });
-  } catch (error) {
-    if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
-      throw new GeminiServiceError(504, 'timeout', 'Gemini model verification timed out. Please retry.');
+  const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
+  if (geminiModelCache.keyHash === keyHash && geminiModelCache.expiresAt > Date.now()) {
+    return geminiModelCache.promise;
+  }
+  const cacheEntry = { expiresAt: Date.now() + GEMINI_MODEL_CACHE_MS, keyHash, promise: null };
+  cacheEntry.promise = (async () => {
+    let response;
+    try {
+      response = await fetch(`${GEMINI_API_BASE}/models?key=${encodeURIComponent(apiKey)}&pageSize=100`, {
+        signal: AbortSignal.timeout(3000),
+      });
+    } catch (error) {
+      if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+        throw new GeminiServiceError(504, 'timeout', 'Gemini model verification timed out. Please retry.');
+      }
+      throw new GeminiServiceError(502, 'network', 'Could not verify Gemini model availability. Check the server network connection.');
     }
-    throw new GeminiServiceError(502, 'network', 'Could not verify Gemini model availability. Check the server network connection.');
-  }
-  let result;
-  try {
-    result = await response.json();
-  } catch {
-    throw new GeminiServiceError(502, 'response_parse', 'Gemini returned an unreadable model list.');
-  }
-  if (!response.ok) throw geminiHttpError(response.status, result);
-  const names = Array.isArray(result.models)
-    ? result.models
-        .filter((model) => Array.isArray(model.supportedGenerationMethods) && model.supportedGenerationMethods.includes('generateContent'))
-        .map((model) => String(model.name || '').replace(/^models\//, ''))
-        .filter(Boolean)
-    : [];
-  if (!names.length) throw new GeminiServiceError(503, 'model', 'Gemini did not list any models that support generateContent.');
-  geminiModelCache.names = names;
-  geminiModelCache.expiresAt = Date.now() + GEMINI_MODEL_CACHE_MS;
-  return names;
+    let result;
+    try {
+      result = await response.json();
+    } catch {
+      throw new GeminiServiceError(502, 'response_parse', 'Gemini returned an unreadable model list.');
+    }
+    if (!response.ok) throw geminiHttpError(response.status, result);
+    const names = Array.isArray(result.models)
+      ? result.models
+          .filter((model) => Array.isArray(model.supportedGenerationMethods) && model.supportedGenerationMethods.includes('generateContent'))
+          .map((model) => String(model.name || '').replace(/^models\//, ''))
+          .filter(Boolean)
+      : [];
+    if (!names.length) throw new GeminiServiceError(503, 'model', 'Gemini did not list any models that support generateContent.');
+    return names;
+  })().catch((error) => {
+    cacheEntry.expiresAt = Date.now() + GEMINI_MODEL_ERROR_CACHE_MS;
+    throw error;
+  });
+  geminiModelCache = cacheEntry;
+  return cacheEntry.promise;
 }
 
 async function resolveGeminiModel(apiKey) {
   const availableModels = await listGeminiModels(apiKey);
-  const configuredModel = String(process.env.GEMINI_MODEL || '').trim().replace(/^models\//, '');
+  const configuredModel = configuredGeminiModel;
   if (configuredModel) {
     if (!availableModels.includes(configuredModel)) {
       throw new GeminiServiceError(503, 'model', 'The configured GEMINI_MODEL is not available for generateContent with this API key.');
@@ -793,55 +826,70 @@ async function generateGeminiJson({
   let errorCategory = 'unknown';
   try {
     const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) throw new GeminiServiceError(503, 'unconfigured', 'AI is not configured yet. Set GEMINI_API_KEY on the server.');
+    if (!apiKey) throw new GeminiServiceError(503, 'unconfigured', 'Gemini is not configured. Add GEMINI_API_KEY to the project-root .env and restart the server; the Dashboard will continue showing a local insight.');
     model = await resolveGeminiModel(apiKey);
-    let response;
-    try {
-      response = await fetch(
-        `${GEMINI_API_BASE}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            systemInstruction: { parts: [{ text: systemInstruction }] },
-            contents,
-            generationConfig: {
-              responseMimeType: 'application/json',
-              responseSchema,
-              maxOutputTokens,
-              temperature: 0.3,
-            },
-          }),
-          signal: AbortSignal.timeout(timeoutMs),
-        },
-      );
-    } catch (error) {
-      if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
-        throw new GeminiServiceError(504, 'timeout', 'Gemini took too long to respond. Please retry.');
+    console.info(`[Gemini] selected_model=${model}`);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (attempt > 0) {
+        const backoffMs = 250 + Math.floor(Math.random() * 251);
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
       }
-      throw new GeminiServiceError(502, 'network', 'Could not connect to Gemini. Check the server network connection and try again.');
+      try {
+        const attemptTimeoutMs = attempt === 0 ? Math.ceil(timeoutMs / 2) : Math.floor(timeoutMs / 2);
+        const response = await fetch(
+          `${GEMINI_API_BASE}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              systemInstruction: { parts: [{ text: systemInstruction }] },
+              contents,
+              generationConfig: {
+                responseMimeType: 'application/json',
+                responseSchema,
+                maxOutputTokens,
+                temperature: 0.3,
+              },
+            }),
+            signal: AbortSignal.timeout(attemptTimeoutMs),
+          },
+        );
+        let result;
+        try {
+          result = await response.json();
+        } catch {
+          throw new GeminiServiceError(502, 'response_parse', 'Gemini returned an unreadable response. Please retry.');
+        }
+        if (!response.ok) throw geminiHttpError(response.status, result);
+        const candidate = result.candidates?.[0];
+        if (result.promptFeedback?.blockReason || ['SAFETY', 'PROHIBITED_CONTENT', 'BLOCKLIST', 'SPII', 'RECITATION', 'MODEL_ARMOR'].includes(candidate?.finishReason)) {
+          throw new GeminiServiceError(422, 'blocked', 'Gemini could not process that request. Please try a different question.');
+        }
+        const responseText = candidate?.content?.parts?.map((part) => part.text || '').join('').trim() || '';
+        if (!responseText) throw new GeminiServiceError(502, 'empty_response', 'Gemini returned no answer. Please try again.');
+        let data;
+        try {
+          data = JSON.parse(responseText);
+        } catch {
+          throw new GeminiServiceError(502, 'response_parse', 'Gemini returned an unreadable response. Please retry.');
+        }
+        outcome = 'ok';
+        return { data, model };
+      } catch (error) {
+        let serviceError;
+        if (error instanceof GeminiServiceError) {
+          serviceError = error;
+        } else if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+          serviceError = new GeminiServiceError(504, 'timeout', 'Gemini timed out. TurfCast is showing a local insight; retry Gemini in a moment.');
+        } else {
+          serviceError = new GeminiServiceError(502, 'network', 'Could not connect to Gemini. TurfCast is showing a local insight; retry Gemini in a moment.');
+        }
+        const retryable = ['timeout', 'network', 'rate_limit', 'service'].includes(serviceError.category);
+        if (attempt === 0 && retryable) continue;
+        throw serviceError;
+      }
     }
-    let result;
-    try {
-      result = await response.json();
-    } catch {
-      throw new GeminiServiceError(502, 'response_parse', 'Gemini returned an unreadable response. Please try again.');
-    }
-    if (!response.ok) throw geminiHttpError(response.status, result);
-    const candidate = result.candidates?.[0];
-    if (result.promptFeedback?.blockReason || ['SAFETY', 'PROHIBITED_CONTENT', 'BLOCKLIST', 'SPII', 'RECITATION', 'MODEL_ARMOR'].includes(candidate?.finishReason)) {
-      throw new GeminiServiceError(422, 'blocked', 'Gemini could not process that request. Please try a different question.');
-    }
-    const responseText = candidate?.content?.parts?.map((part) => part.text || '').join('').trim() || '';
-    if (!responseText) throw new GeminiServiceError(502, 'empty_response', 'Gemini returned no answer. Please try again.');
-    let data;
-    try {
-      data = JSON.parse(responseText);
-    } catch {
-      throw new GeminiServiceError(502, 'response_parse', 'Gemini returned an unreadable response. Please try again.');
-    }
-    outcome = 'ok';
-    return { data, model };
+    throw new GeminiServiceError(502, 'service', 'Gemini is temporarily unavailable. Please retry.');
   } catch (error) {
     const knownError = error instanceof GeminiServiceError
       ? error
@@ -1001,71 +1049,118 @@ const ownerAiSystemInstruction = [
   'Keep the answer conversational and brief, with short paragraphs. Use keyFindings for a few sourced facts and suggestedActions for clearly labelled advice only when useful. Return concise JSON matching the requested schema.',
 ].join(' ');
 
+function buildLocalOwnerRecommendation(context) {
+  const recent = context.recentPerformance;
+  const payments = context.payments;
+  const unpaidAmount = payments.unpaidOutstandingINR;
+  const unpaidCount = payments.unpaidBookingCount;
+  if (recent.confirmedBookings < 5) {
+    return {
+      title: 'Build a clearer booking picture',
+      reason: `There are ${recent.confirmedBookings} confirmed bookings in the last ${recent.periodDays} days, which is a limited sample for comparing demand.`,
+      action: 'Keep tracking bookings over the next few weeks before making larger schedule or pricing changes.',
+    };
+  }
+  if (unpaidCount > 0 && unpaidAmount > 0) {
+    return {
+      title: 'Review unpaid bookings',
+      reason: `Current records show ${unpaidCount} unpaid bookings totaling ${unpaidAmount} INR.`,
+      action: 'Review those bookings in the existing payment controls and follow up as appropriate.',
+    };
+  }
+  const lowestUtilization = recent.lowestUtilizationTimeSlots?.[0];
+  if (lowestUtilization && lowestUtilization.capacity > 0 && lowestUtilization.utilizationPercent < 20) {
+    return {
+      title: 'Review a quieter time slot',
+      reason: `${lowestUtilization.startTime} had ${lowestUtilization.booked} bookings and ${lowestUtilization.utilizationPercent}% utilization over the last ${recent.periodDays} days.`,
+      action: 'Consider testing a time-limited promotion for this slot; review its results before making broader changes.',
+    };
+  }
+  return {
+    title: 'Keep monitoring booking patterns',
+    reason: `${recent.confirmedBookings} confirmed bookings were recorded in the last ${recent.periodDays} days; current unpaid bookings total ${unpaidAmount} INR.`,
+    action: 'Review utilization and payment records regularly before changing prices or schedules.',
+  };
+}
+
+function cacheOwnerRecommendation(cacheKey, response) {
+  const now = Date.now();
+  for (const [key, entry] of recommendationCache) {
+    if (entry.expiresAt <= now) recommendationCache.delete(key);
+  }
+  if (recommendationCache.size >= 100) recommendationCache.clear();
+  recommendationCache.set(cacheKey, { expiresAt: now + RECOMMENDATION_CACHE_MS, response });
+}
+
+function ownerLocalFallback(context, error) {
+  return {
+    recommendations: [buildLocalOwnerRecommendation(context)],
+    source: 'local',
+    fallbackReason: error?.message || 'Gemini is unavailable. This is a local insight based on current booking and payment records.',
+  };
+}
+
 app.get('/api/ai/owner-recommendations', route(async (req, res) => {
   const store = await readStore();
   if (authenticatedUser(store, req)?.role !== 'owner') {
     return res.status(403).json({ message: 'Owner access is required to view AI recommendations.' });
   }
-  if (!process.env.GEMINI_API_KEY) {
-    return res.status(503).json({ message: 'AI recommendations are not configured yet. Set GEMINI_API_KEY on the server.' });
-  }
   const businessContext = buildOwnerBusinessContext(store);
-  const modelCheckStartedAt = Date.now();
-  let model;
-  try {
-    model = await resolveGeminiModel(process.env.GEMINI_API_KEY);
-  } catch (error) {
-    const serviceError = error instanceof GeminiServiceError ? error : new GeminiServiceError(503, 'model', 'Gemini model verification failed.');
-    console.info(`[Gemini] purpose=owner-recommendations model=unresolved durationMs=${Date.now() - modelCheckStartedAt} status=error category=${serviceError.category}`);
-    return res.status(serviceError.status).json({ message: serviceError.message });
-  }
-  const cacheKey = crypto.createHash('sha256')
-    .update(JSON.stringify({ model, businessContext }))
-    .digest('hex');
+  const cacheKey = crypto.createHash('sha256').update(JSON.stringify(businessContext)).digest('hex');
+  const forceGemini = req.query.refresh === '1';
   const cached = recommendationCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) return res.json(cached.response);
-  for (const [key, entry] of recommendationCache) {
-    if (entry.expiresAt <= Date.now()) recommendationCache.delete(key);
-  }
-  if (recommendationCache.size > 100) recommendationCache.clear();
+  if (!forceGemini && cached && cached.expiresAt > Date.now()) return res.json(cached.response);
 
-  let result;
+  let generated = recommendationInflight.get(cacheKey);
+  if (!generated) {
+    generated = (async () => {
+      const result = await generateGeminiJson({
+        purpose: 'owner-recommendations',
+        systemInstruction: [
+          'You are a practical business analyst for one college turf.',
+          'Use only the supplied server-derived business aggregates. Do not invent causes, figures, or trends.',
+          'Return exactly one concise, high-quality recommendation directly supported by the data. If there is little history, say so and suggest a low-risk way to learn more.',
+          'Advice is informational only. Never imply a price or booking has been changed. Never use weather to recommend price changes.',
+        ].join(' '),
+        contents: [{ role: 'user', parts: [{ text: `TurfCast business aggregates: ${JSON.stringify(businessContext)}` }] }],
+        responseSchema: recommendationResponseSchema,
+        maxOutputTokens: 240,
+        timeoutMs: 7000,
+      });
+      const first = Array.isArray(result.data?.recommendations) ? result.data.recommendations[0] : null;
+      if (
+        !first ||
+        typeof first.title !== 'string' || !first.title.trim() ||
+        typeof first.reason !== 'string' || !first.reason.trim() ||
+        typeof first.action !== 'string' || !first.action.trim()
+      ) {
+        throw new GeminiServiceError(502, 'response_validation', 'Gemini returned an incomplete recommendation. TurfCast is showing a local insight instead.');
+      }
+      return {
+        recommendations: [{
+          title: first.title.trim().slice(0, 100),
+          reason: first.reason.trim().slice(0, 300),
+          action: first.action.trim().slice(0, 300),
+        }],
+        source: 'gemini',
+      };
+    })();
+    recommendationInflight.set(cacheKey, generated);
+  }
   try {
-    result = await generateGeminiJson({
-      purpose: 'owner-recommendations',
-      systemInstruction: [
-        'You are a practical business analyst for one college turf.',
-        'Use only the supplied server-derived business aggregates. Do not invent causes, figures, or trends.',
-        'Return exactly one concise, high-quality recommendation directly supported by the data. If there is little history, say so and suggest a low-risk way to learn more.',
-        'Advice is informational only. Never imply a price or booking has been changed. Never use weather to recommend price changes.',
-      ].join(' '),
-      contents: [{ role: 'user', parts: [{ text: `TurfCast business aggregates: ${JSON.stringify(businessContext)}` }] }],
-      responseSchema: recommendationResponseSchema,
-      maxOutputTokens: 240,
-      timeoutMs: 7000,
-    });
+    const response = await generated;
+    cacheOwnerRecommendation(cacheKey, response);
+    return res.json(response);
   } catch (error) {
-    const serviceError = error instanceof GeminiServiceError ? error : new GeminiServiceError(502, 'internal', 'Gemini recommendations are temporarily unavailable.');
-    return res.status(serviceError.status).json({ message: serviceError.message });
+    const serviceError = error instanceof GeminiServiceError
+      ? error
+      : new GeminiServiceError(502, 'internal', 'Gemini is unavailable. TurfCast is showing a local insight instead.');
+    const fallback = ownerLocalFallback(businessContext, serviceError);
+    cacheOwnerRecommendation(cacheKey, fallback);
+    return res.json(fallback);
+  } finally {
+    if (recommendationInflight.get(cacheKey) === generated) recommendationInflight.delete(cacheKey);
   }
-  const first = Array.isArray(result.data?.recommendations) ? result.data.recommendations[0] : null;
-  if (
-    !first ||
-    typeof first.title !== 'string' || !first.title.trim() ||
-    typeof first.reason !== 'string' || !first.reason.trim() ||
-    typeof first.action !== 'string' || !first.action.trim()
-  ) {
-    return res.status(502).json({ message: 'AI could not produce a usable recommendation. Please try again.' });
-  }
-  const response = {
-    recommendations: [{
-      title: first.title.trim().slice(0, 100),
-      reason: first.reason.trim().slice(0, 300),
-      action: first.action.trim().slice(0, 300),
-    }],
-  };
-  recommendationCache.set(cacheKey, { expiresAt: Date.now() + RECOMMENDATION_CACHE_MS, response });
-  res.json(response);
 }));
 
 app.post('/api/ai/owner-assistant', route(async (req, res) => {
@@ -1073,10 +1168,6 @@ app.post('/api/ai/owner-assistant', route(async (req, res) => {
   const user = authenticatedUser(store, req);
   if (!user) return res.status(401).json({ message: 'Sign in with an owner account to use the assistant.' });
   if (user.role !== 'owner') return res.status(403).json({ message: 'Owner access is required to use the assistant.' });
-  if (!process.env.GEMINI_API_KEY) {
-    return res.status(503).json({ message: 'AI is not configured yet. Set GEMINI_API_KEY on the server.' });
-  }
-
   const question = typeof req.body.question === 'string' ? req.body.question.trim() : '';
   if (!question) return res.status(400).json({ message: 'Enter a question before sending.' });
   if (question.length > 1500) return res.status(400).json({ message: 'Keep the question under 1,500 characters.' });
@@ -1113,7 +1204,10 @@ app.post('/api/ai/owner-assistant', route(async (req, res) => {
     });
   } catch (error) {
     const serviceError = error instanceof GeminiServiceError ? error : new GeminiServiceError(502, 'internal', 'The assistant is temporarily unavailable.');
-    return res.status(serviceError.status).json({ message: serviceError.message });
+    return res.status(serviceError.status).json({
+      message: serviceError.message,
+      category: serviceError.category,
+    });
   }
   const answer = typeof result.data?.answer === 'string' ? result.data.answer.trim().slice(0, 3000) : '';
   if (!answer) return res.status(502).json({ message: 'The assistant returned an incomplete answer. Please retry.' });
