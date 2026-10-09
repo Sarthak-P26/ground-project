@@ -361,7 +361,7 @@ async function fetchOpenMeteoForecast(location) {
   url.searchParams.set('hourly', 'temperature_2m,precipitation_probability,precipitation,weather_code');
   url.searchParams.set('daily', 'temperature_2m_max,temperature_2m_min,weather_code,sunrise,sunset');
   url.searchParams.set('timezone', 'Asia/Kolkata');
-  url.searchParams.set('forecast_days', '7');
+  url.searchParams.set('forecast_days', '16');
   try {
     const data = await fetchWeatherJson(url, WEATHER_PROVIDER);
     if (!validateForecastResponse(data)) {
@@ -420,7 +420,7 @@ function weatherConditions(date, hour, location, forecast, servedAt = new Date()
   const { data, retrievedAt, freshness, ageMs } = forecast;
   const dateIndex = data.daily.time.indexOf(date);
   if (dateIndex < 0) {
-    return unavailableWeather('date_out_of_range', 'The requested date is outside the available seven-day forecast.', {
+    return unavailableWeather('date_out_of_range', 'The requested date is outside the available 16-day forecast.', {
       provider: WEATHER_PROVIDER,
       location,
       forecastRange: {

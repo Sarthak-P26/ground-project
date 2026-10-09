@@ -73,6 +73,9 @@ modelled current conditions, daily high/low temperatures, and hourly forecasts. 
 weather API key is required. Resolved locations and successful forecasts are cached
 in `data/weather-cache.json`; forecasts are refreshed after 15 minutes, with a
 successful cache usable as stale data for up to three hours during provider outages.
+The forecast request covers 16 calendar days, including today, which covers the
+14-day booking window; dates outside the provider's returned range are explicitly
+reported as unavailable.
 The normalized response is available at `GET /api/weather?date=YYYY-MM-DD&hour=18`;
 the existing `/api/weather-risk` and owner `/api/forecast` routes remain available.
 IMD's documented JSON endpoints required credentials (HTTP 401 during verification),
