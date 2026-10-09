@@ -425,20 +425,34 @@ function App() {
     }
     fetch('/api/auth/session', { headers: authHeaders() })
       .then(async (response) => {
-        if (!response.ok) throw new Error('expired');
+        if (response.status === 401) {
+          localStorage.removeItem(STORAGE_KEYS.token);
+          localStorage.removeItem(STORAGE_KEYS.user);
+          localStorage.removeItem(STORAGE_KEYS.bookings);
+          setBookings([]);
+          setCurrentUser(null);
+          setAuthMode('login');
+          setAuthNotice('Your session expired. Please log in again.');
+          return;
+        }
+        if (!response.ok) throw new Error('verification-failed');
         const { user } = await response.json();
-        if (!user || !['student', 'owner'].includes(user.role)) throw new Error('invalid-role');
+        if (!user || !['student', 'owner'].includes(user.role)) {
+          localStorage.removeItem(STORAGE_KEYS.token);
+          localStorage.removeItem(STORAGE_KEYS.user);
+          localStorage.removeItem(STORAGE_KEYS.bookings);
+          setBookings([]);
+          setCurrentUser(null);
+          setAuthMode('login');
+          setAuthNotice('Your session is invalid. Please log in again.');
+          return;
+        }
         setCurrentUser(user);
         saveJson(STORAGE_KEYS.user, user);
       })
       .catch(() => {
-        localStorage.removeItem(STORAGE_KEYS.token);
-        localStorage.removeItem(STORAGE_KEYS.user);
-        localStorage.removeItem(STORAGE_KEYS.bookings);
-        setBookings([]);
-        setCurrentUser(null);
         setAuthMode('login');
-        setAuthNotice('Your session expired. Please log in again.');
+        setAuthNotice('Unable to verify your session. Check your connection and refresh to try again.');
       })
       .finally(() => {
         setSessionLoading(false);
@@ -460,11 +474,18 @@ function App() {
   }, [currentUser?.id]);
 
   useEffect(() => {
+    if (sessionLoading) return undefined;
+    let active = true;
+    let requestInFlight = false;
+
     async function loadServerStore() {
+      if (requestInFlight) return;
+      requestInFlight = true;
       try {
         const response = await fetch('/api/store', { headers: authHeaders() });
         if (!response.ok) throw new Error('Server unavailable');
         const store = await response.json();
+        if (!active) return;
         const mergedSettings = normalizeSettings(store.settings);
         const serverBookings = normalizeBookings(store.bookings);
         setSettings(mergedSettings);
@@ -474,12 +495,26 @@ function App() {
         saveJson(STORAGE_KEYS.bookings, serverBookings);
         setSyncStatus('Live');
       } catch {
-        setSyncStatus('Offline');
+        if (active) setSyncStatus('Offline');
+      } finally {
+        requestInFlight = false;
       }
     }
 
-    loadServerStore();
-  }, []);
+    void loadServerStore();
+    const syncInterval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void loadServerStore();
+    }, 15000);
+    const syncOnFocus = () => {
+      if (document.visibilityState === 'visible') void loadServerStore();
+    };
+    window.addEventListener('focus', syncOnFocus);
+    return () => {
+      active = false;
+      window.clearInterval(syncInterval);
+      window.removeEventListener('focus', syncOnFocus);
+    };
+  }, [currentUser?.id, sessionLoading]);
 
   function persistBookings(nextBookings) {
     const safeBookings = normalizeBookings(nextBookings);

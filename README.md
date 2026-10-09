@@ -14,6 +14,7 @@ A full web app for booking a college turf split into four playable sections. It 
 - Three-hour slots at Rs. 600 by default
 - Configurable price, duration, open hours, close hours, sports, and section names
 - Shared Node API with file-backed storage in `data/store.json`
+- Authenticated workspaces refresh shared bookings and turf settings every 15 seconds and when the browser regains focus
 - Duplicate-slot protection so two players cannot book the same section and time
 - Server-side validation for phone numbers, booking window, maintenance dates, sections, sports, and valid time slots
 - Owner-only controls for exports, all-booking cancellation, payment updates, and turf settings
