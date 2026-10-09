@@ -30,7 +30,7 @@
 
 body {
   margin: 0;
-  min-width: 320px;
+  min-width: 0;
   min-height: 100vh;
 }
 
@@ -43,6 +43,12 @@ textarea {
 
 button {
   cursor: pointer;
+}
+
+button:focus-visible,
+a:focus-visible {
+  outline: 3px solid #2563eb;
+  outline-offset: 2px;
 }
 
 .app-shell {
@@ -1554,7 +1560,7 @@ textarea:focus {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 10;
+  z-index: 110;
   display: grid;
   place-items: center;
   padding: 20px;
@@ -4052,7 +4058,7 @@ textarea:focus {
   .owner-assistant-panel {
     right: max(10px, env(safe-area-inset-right));
     bottom: calc(max(16px, env(safe-area-inset-bottom)) + 58px);
-    width: min(370px, calc(100vw - max(20px, env(safe-area-inset-left) + env(safe-area-inset-right))));
+    width: min(370px, calc(100vw - 40px - env(safe-area-inset-left) - env(safe-area-inset-right)));
     height: min(570px, calc(100dvh - 88px - env(safe-area-inset-bottom)));
     min-height: min(250px, calc(100dvh - 88px - env(safe-area-inset-bottom)));
     border-radius: 15px;
@@ -4190,5 +4196,16 @@ textarea:focus {
   .owner-price-advisor-facts {
     grid-template-columns: 1fr;
     gap: 8px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

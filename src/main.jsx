@@ -121,6 +121,71 @@ function authHeaders(headers = {}) {
   };
 }
 
+function useDialogAccessibility(onClose, active = true, closeOnEscape = true) {
+  const dialogRef = useRef(null);
+  const onCloseRef = useRef(onClose);
+  const closeOnEscapeRef = useRef(closeOnEscape);
+
+  onCloseRef.current = onClose;
+  closeOnEscapeRef.current = closeOnEscape;
+
+  useEffect(() => {
+    if (!active || !dialogRef.current) return undefined;
+
+    const dialog = dialogRef.current;
+    const previouslyFocused = document.activeElement;
+    const focusableSelector = [
+      'a[href]',
+      'button:not([disabled])',
+      'input:not([disabled]):not([type="hidden"])',
+      'select:not([disabled])',
+      'textarea:not([disabled])',
+      '[tabindex]:not([tabindex="-1"])',
+    ].join(',');
+    const focusableElements = () => [...dialog.querySelectorAll(focusableSelector)]
+      .filter((element) => element.getClientRects().length > 0);
+    const initialFocus = dialog.querySelector('[data-dialog-initial-focus]')
+      || dialog.querySelector('input:not([disabled]):not([type="hidden"]):not([readonly]), select:not([disabled]), textarea:not([disabled])')
+      || focusableElements()[0];
+    (initialFocus || dialog).focus();
+
+    function handleKeyDown(event) {
+      if (event.key === 'Escape' && closeOnEscapeRef.current) {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+
+      const focusable = focusableElements();
+      if (!focusable.length) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      if (previouslyFocused instanceof HTMLElement && previouslyFocused.isConnected) {
+        previouslyFocused.focus();
+      }
+    };
+  }, [active]);
+
+  return dialogRef;
+}
+
 function toDateInput(date) {
   const offsetDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
   return offsetDate.toISOString().slice(0, 10);
@@ -1850,6 +1915,7 @@ function StudentAssistantChat({ context }) {
   const [lastFailedQuestion, setLastFailedQuestion] = useState('');
   const requestRef = useRef(null);
   const messagesRef = useRef(null);
+  const dialogRef = useDialogAccessibility(() => setOpen(false), open);
 
   useEffect(() => {
     if (open && messagesRef.current) messagesRef.current.scrollTop = messagesRef.current.scrollHeight;
@@ -1928,11 +1994,18 @@ function StudentAssistantChat({ context }) {
   return (
     <div className="owner-assistant student-assistant">
       {open && (
-        <section className="owner-assistant-panel" role="dialog" aria-label="TurfCast Student Assistant">
+        <section
+          className="owner-assistant-panel"
+          ref={dialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="student-assistant-title"
+          tabIndex={-1}
+        >
           <header className="owner-assistant-header">
             <div className="owner-assistant-title">
               <span className="owner-assistant-avatar"><Sparkles size={17} /></span>
-              <div><strong>TurfCast Student AI</strong><small>Helpful answers for your game day</small></div>
+              <div><strong id="student-assistant-title">TurfCast Student AI</strong><small>Helpful answers for your game day</small></div>
             </div>
             <button className="owner-assistant-close" type="button" onClick={() => setOpen(false)} aria-label="Minimize student assistant" title="Minimize">
               <X size={18} />
@@ -1983,6 +2056,7 @@ function StudentAssistantChat({ context }) {
           )}
           <form className="owner-assistant-composer" onSubmit={submitDraft}>
             <textarea
+              data-dialog-initial-focus
               aria-label="Message TurfCast Student AI"
               placeholder="Ask about slots, prices, or weather…"
               value={draft}
@@ -2027,6 +2101,7 @@ function OwnerAssistantChat() {
   const [lastFailedQuestion, setLastFailedQuestion] = useState('');
   const requestRef = useRef(null);
   const messagesRef = useRef(null);
+  const dialogRef = useDialogAccessibility(() => setOpen(false), open);
 
   useEffect(() => {
     if (open && messagesRef.current) messagesRef.current.scrollTop = messagesRef.current.scrollHeight;
@@ -2104,11 +2179,18 @@ function OwnerAssistantChat() {
   return (
     <div className="owner-assistant">
       {open && (
-        <section className="owner-assistant-panel" role="dialog" aria-label="TurfCast AI Assistant">
+        <section
+          className="owner-assistant-panel"
+          ref={dialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="owner-assistant-title"
+          tabIndex={-1}
+        >
           <header className="owner-assistant-header">
             <div className="owner-assistant-title">
               <span className="owner-assistant-avatar"><Sparkles size={17} /></span>
-              <div><strong>TurfCast AI</strong><small>Your friendly turf companion</small></div>
+              <div><strong id="owner-assistant-title">TurfCast AI</strong><small>Your friendly turf companion</small></div>
             </div>
             <button className="owner-assistant-close" type="button" onClick={() => setOpen(false)} aria-label="Minimize assistant" title="Minimize">
               <X size={18} />
@@ -2154,6 +2236,7 @@ function OwnerAssistantChat() {
           )}
           <form className="owner-assistant-composer" onSubmit={submitDraft}>
             <textarea
+              data-dialog-initial-focus
               aria-label="Message TurfCast AI Assistant"
               placeholder="Ask about your turf or a general topic…"
               value={draft}
@@ -2446,6 +2529,7 @@ function OwnerPricing({
 
   async function saveDefault(event) {
     event.preventDefault();
+    if (savingDefault) return;
     const price = Number(defaultPrice);
     if (!Number.isSafeInteger(price) || price < 1 || price > 100000) {
       setDefaultError('Enter a whole-number price from ₹1 to ₹100,000.');
@@ -2466,6 +2550,7 @@ function OwnerPricing({
 
   async function saveSlotPrice(event) {
     event.preventDefault();
+    if (savingSlot) return;
     const price = Number(slotPrice);
     if (!Number.isSafeInteger(price) || price < 1 || price > 100000) {
       setSlotError('Enter a whole-number price from ₹1 to ₹100,000.');
@@ -2495,7 +2580,7 @@ function OwnerPricing({
   }
 
   async function resetSelectedOverride() {
-    if (!selectedOverride) return;
+    if (!selectedOverride || savingSlot) return;
     setSavingSlot(true);
     setSlotError('');
     setNotice('');
@@ -2845,15 +2930,20 @@ function OwnerAnalytics({ bookings, settings }) {
 
 function ProfileModal({ user, onClose, onSave }) {
   const [saving, setSaving] = useState(false);
+  const dialogRef = useDialogAccessibility(onClose, true, !saving);
   const isOwner = user.role === 'owner';
   async function submit(event) {
     event.preventDefault();
+    if (saving) return;
     setSaving(true);
-    await onSave(Object.fromEntries(new FormData(event.currentTarget).entries()));
-    setSaving(false);
+    try {
+      await onSave(Object.fromEntries(new FormData(event.currentTarget).entries()));
+    } finally {
+      setSaving(false);
+    }
   }
-  return <div className="modal-backdrop"><form className="modal" onSubmit={submit}>
-    <div className="modal-header"><div><p>{isOwner ? 'Owner account' : 'Student account'}</p><h2>Profile</h2></div><button className="icon-button" type="button" onClick={onClose} title="Close"><X size={20} /></button></div>
+  return <div className="modal-backdrop"><form className="modal" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="profile-dialog-title" tabIndex={-1} onSubmit={submit}>
+    <div className="modal-header"><div><p>{isOwner ? 'Owner account' : 'Student account'}</p><h2 id="profile-dialog-title">Profile</h2></div><button className="icon-button" type="button" onClick={onClose} title="Close" aria-label="Close profile" disabled={saving}><X size={20} /></button></div>
     <label>Full name<input name="name" defaultValue={user.name} required /></label>
     <label>Email<input name="email" type="email" defaultValue={user.email} required /></label>
     <label>Phone<input name="phone" type="tel" defaultValue={user.phone} required /></label>
@@ -2861,33 +2951,40 @@ function ProfileModal({ user, onClose, onSave }) {
       <label>Business / Turf Name<input name="businessName" defaultValue={user.businessName || ''} /></label>
       <label>Owner Title<input name="ownerTitle" defaultValue={user.ownerTitle || ''} /></label>
     </> : <label>College ID<input name="collegeId" defaultValue={user.collegeId || ''} /></label>}
-    <div className="modal-actions"><button className="ghost-button" type="button" onClick={onClose}>Close</button><button className="primary-button" type="submit" disabled={saving}>{saving ? 'Saving' : 'Save Profile'}</button></div>
+    <div className="modal-actions"><button className="ghost-button" type="button" onClick={onClose} disabled={saving}>Close</button><button className="primary-button" type="submit" disabled={saving}>{saving ? 'Saving' : 'Save Profile'}</button></div>
   </form></div>;
 }
 
 function BookingModal({ settings, selectedSlot, activeDate, selectedSport, currentUser, onClose, onSave }) {
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const dialogRef = useDialogAccessibility(onClose, true, !saving);
 
   async function handleSubmit(event) {
     event.preventDefault();
+    if (saving) return;
     setSaving(true);
-    const result = await onSave(new FormData(event.currentTarget));
-    setSaving(false);
-    if (!result.ok) {
-      setError(result.message);
+    try {
+      const result = await onSave(new FormData(event.currentTarget));
+      if (!result.ok) setError(result.message);
+    } catch (submitError) {
+      setError(submitError instanceof Error && submitError.message
+        ? submitError.message
+        : 'Booking could not be saved. Please try again.');
+    } finally {
+      setSaving(false);
     }
   }
 
   return (
     <div className="modal-backdrop">
-      <form className="modal student-booking-modal" onSubmit={handleSubmit}>
+      <form className="modal student-booking-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="booking-dialog-title" tabIndex={-1} onSubmit={handleSubmit}>
         <div className="modal-header">
           <div>
             <p>Confirm your booking</p>
-            <h2>{selectedSport} · {selectedSlot.section}</h2>
+            <h2 id="booking-dialog-title">{selectedSport} · {selectedSlot.section}</h2>
           </div>
-          <button className="icon-button" type="button" onClick={onClose} title="Close">
+          <button className="icon-button" type="button" onClick={onClose} title="Close" aria-label="Close booking confirmation" disabled={saving}>
             <X size={20} />
           </button>
         </div>
@@ -2900,7 +2997,7 @@ function BookingModal({ settings, selectedSlot, activeDate, selectedSport, curre
 
         <label>
           Player Name
-          <input name="playerName" type="text" value={currentUser.name} readOnly autoFocus />
+          <input name="playerName" type="text" value={currentUser.name} readOnly />
         </label>
 
         <label>
@@ -2915,17 +3012,17 @@ function BookingModal({ settings, selectedSlot, activeDate, selectedSport, curre
         <input type="hidden" name="sport" value={selectedSport} />
         <label>
           Number of players
-          <input name="teamSize" type="number" min="1" step="1" defaultValue="10" required />
+          <input name="teamSize" type="number" min="1" step="1" defaultValue="10" required data-dialog-initial-focus />
         </label>
         <label>
           Notes (optional)
           <textarea name="notes" rows="2" maxLength="500" placeholder="Anything the turf team should know?" />
         </label>
 
-        {error && <p className="form-error">{error}</p>}
+        {error && <p className="form-error" role="alert">{error}</p>}
 
         <div className="modal-actions">
-          <button className="ghost-button" type="button" onClick={onClose}>Cancel</button>
+          <button className="ghost-button" type="button" onClick={onClose} disabled={saving}>Cancel</button>
           <button className="primary-button" type="submit" disabled={saving}>
             <CreditCard size={18} />
             <span>{saving ? 'Saving' : 'Confirm Booking'}</span>
@@ -2940,25 +3037,34 @@ function CancellationConfirmModal({ booking, onClose, onConfirm }) {
   const [rememberChoice, setRememberChoice] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const dialogRef = useDialogAccessibility(onClose, true, !saving);
 
   async function confirm(event) {
     event.preventDefault();
+    if (saving) return;
     setSaving(true);
     setError('');
-    const result = await onConfirm(rememberChoice);
-    setSaving(false);
-    if (!result.ok) setError(result.message || 'Could not cancel this booking.');
+    try {
+      const result = await onConfirm(rememberChoice);
+      if (!result.ok) setError(result.message || 'Could not cancel this booking.');
+    } catch (confirmError) {
+      setError(confirmError instanceof Error && confirmError.message
+        ? confirmError.message
+        : 'Could not cancel this booking.');
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
     <div className="modal-backdrop">
-      <form className="modal cancellation-confirmation" onSubmit={confirm} role="dialog" aria-modal="true" aria-labelledby="cancel-booking-title">
+      <form className="modal cancellation-confirmation" ref={dialogRef} onSubmit={confirm} role="dialog" aria-modal="true" aria-labelledby="cancel-booking-title" tabIndex={-1}>
         <div className="modal-header">
           <div>
             <p>Booking cancellation</p>
             <h2 id="cancel-booking-title">Cancel this booking?</h2>
           </div>
-          <button className="icon-button" type="button" onClick={onClose} title="Close" disabled={saving}>
+          <button className="icon-button" type="button" onClick={onClose} title="Close" aria-label="Close cancellation confirmation" disabled={saving}>
             <X size={20} />
           </button>
         </div>
@@ -2991,6 +3097,7 @@ function SettingsModal({ settings, onClose, onSave }) {
   const [draft, setDraft] = useState(settings);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const dialogRef = useDialogAccessibility(onClose, true, !saving);
 
   function setNumber(key, value) {
     setDraft((current) => ({ ...current, [key]: Number(value) }));
@@ -3006,6 +3113,7 @@ function SettingsModal({ settings, onClose, onSave }) {
 
   async function handleSubmit(event) {
     event.preventDefault();
+    if (saving) return;
     const safeSettings = {
       ...draft,
       price: Math.max(1, Number(draft.price)),
@@ -3033,13 +3141,13 @@ function SettingsModal({ settings, onClose, onSave }) {
 
   return (
     <div className="modal-backdrop">
-      <form className="modal" onSubmit={handleSubmit}>
+      <form className="modal" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="settings-dialog-title" tabIndex={-1} onSubmit={handleSubmit}>
         <div className="modal-header">
           <div>
             <p>Ground Rules</p>
-            <h2>Settings</h2>
+            <h2 id="settings-dialog-title">Settings</h2>
           </div>
-          <button className="icon-button" type="button" onClick={onClose} title="Close">
+          <button className="icon-button" type="button" onClick={onClose} title="Close" aria-label="Close settings" disabled={saving}>
             <X size={20} />
           </button>
         </div>
@@ -3103,7 +3211,7 @@ function SettingsModal({ settings, onClose, onSave }) {
         {error && <p className="form-error" role="alert">{error}</p>}
 
         <div className="modal-actions">
-          <button className="ghost-button" type="button" onClick={onClose}>Cancel</button>
+          <button className="ghost-button" type="button" onClick={onClose} disabled={saving}>Cancel</button>
           <button className="primary-button" type="submit" disabled={saving}>
             <Save size={18} />
             <span>{saving ? 'Saving' : 'Save Settings'}</span>
@@ -3115,19 +3223,21 @@ function SettingsModal({ settings, onClose, onSave }) {
 }
 
 function ReceiptModal({ booking, confirmed = false, student = false, onClose }) {
+  const dialogRef = useDialogAccessibility(onClose);
+
   function printReceipt() {
     window.print();
   }
 
   return (
     <div className="modal-backdrop">
-      <section className="modal receipt-modal">
+      <section className="modal receipt-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="receipt-dialog-title" tabIndex={-1}>
         <div className="modal-header no-print">
           <div>
             <p>{confirmed ? 'Booking confirmed' : student ? 'Booking details' : 'Booking receipt'}</p>
-            <h2>{confirmed ? 'You’re all set!' : booking.id}</h2>
+            <h2 id="receipt-dialog-title">{confirmed ? 'You’re all set!' : booking.id}</h2>
           </div>
-          <button className="icon-button" type="button" onClick={onClose} title="Close">
+          <button className="icon-button" type="button" onClick={onClose} title="Close" aria-label="Close booking receipt">
             <X size={20} />
           </button>
         </div>
