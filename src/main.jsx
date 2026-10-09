@@ -62,7 +62,7 @@ const DEFAULT_SETTINGS = {
   bookingWindowDays: 14,
   maxActiveBookingsPerPhone: 2,
   maintenanceDates: [],
-  turfLocation: '',
+  turfLocation: 'Dharashiv, Maharashtra',
 };
 
 function normalizeSettings(settings) {
@@ -87,7 +87,9 @@ function normalizeSettings(settings) {
     bookingWindowDays: Number.isSafeInteger(input.bookingWindowDays) && input.bookingWindowDays > 0
       ? input.bookingWindowDays
       : DEFAULT_SETTINGS.bookingWindowDays,
-    turfLocation: typeof input.turfLocation === 'string' ? input.turfLocation : '',
+    turfLocation: typeof input.turfLocation === 'string' && input.turfLocation.trim()
+      ? input.turfLocation.trim()
+      : DEFAULT_SETTINGS.turfLocation,
   };
 }
 
@@ -2526,7 +2528,7 @@ function SettingsModal({ settings, onClose, onSave }) {
     const safeSettings = {
       ...draft,
       price: Math.max(1, Number(draft.price)),
-      turfLocation: String(draft.turfLocation || '').trim().slice(0, 120),
+      turfLocation: String(draft.turfLocation || '').trim().slice(0, 120) || settings.turfLocation || DEFAULT_SETTINGS.turfLocation,
       durationHours: Math.max(1, Number(draft.durationHours)),
       openHour: Math.max(0, Math.min(23, Number(draft.openHour))),
       closeHour: Math.max(1, Math.min(24, Number(draft.closeHour))),

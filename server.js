@@ -9,7 +9,8 @@ import nodemailer from 'nodemailer';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express(); const PORT = process.env.PORT || 4173;
-const defaults = { settings: { price: 600, durationHours: 3, openHour: 6, closeHour: 21, sections: ['Section A', 'Section B', 'Section C', 'Section D'], sports: ['Cricket', 'Football'], bookingWindowDays: 14, maxActiveBookingsPerPhone: 2, maintenanceDates: [], turfLocation: '' }, priceOverrides: [], bookings: [], users: [] };
+const DEFAULT_TURF_LOCATION = 'Dharashiv, Maharashtra';
+const defaults = { settings: { price: 600, durationHours: 3, openHour: 6, closeHour: 21, sections: ['Section A', 'Section B', 'Section C', 'Section D'], sports: ['Cricket', 'Football'], bookingWindowDays: 14, maxActiveBookingsPerPhone: 2, maintenanceDates: [], turfLocation: DEFAULT_TURF_LOCATION }, priceOverrides: [], bookings: [], users: [] };
 const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');
 const databaseUrl = process.env.FIREBASE_DATABASE_URL;
 const hasServiceAccount = Boolean(databaseUrl && process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && privateKey);
@@ -102,6 +103,9 @@ function normalizeUserRoles(users) {
 }
 const normalizeStore = (store = {}, forceRoleMigration = false) => {
   const storedSettings = { ...(store.settings || {}) };
+  const turfLocation = typeof storedSettings.turfLocation === 'string' && storedSettings.turfLocation.trim()
+    ? storedSettings.turfLocation.trim()
+    : DEFAULT_TURF_LOCATION;
   const normalizedUsers = normalizeUserRoles(store.users);
   delete storedSettings.adminPin;
   const normalized = {
@@ -109,6 +113,7 @@ const normalizeStore = (store = {}, forceRoleMigration = false) => {
       ...defaults.settings,
       ...storedSettings,
       price: isValidPrice(storedSettings.price) ? storedSettings.price : defaults.settings.price,
+      turfLocation,
     },
     priceOverrides: normalizePriceOverrides(store.priceOverrides, {
       ...defaults.settings,
@@ -1233,8 +1238,8 @@ app.put('/api/settings', route(async (req, res) => {
       ...old,
       ...settingsInput,
       turfLocation: typeof settingsInput.turfLocation === 'string'
-        ? settingsInput.turfLocation.trim().slice(0, 120)
-        : old.turfLocation || '',
+        ? settingsInput.turfLocation.trim().slice(0, 120) || old.turfLocation || DEFAULT_TURF_LOCATION
+        : old.turfLocation || DEFAULT_TURF_LOCATION,
       price,
       durationHours: Math.max(1, Number(settingsInput.durationHours)),
       openHour: Math.max(0, Math.min(23, Number(settingsInput.openHour))),
