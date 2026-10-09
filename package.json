@@ -8,6 +8,7 @@
     "server": "node server.js",
     "start": "node server.js",
     "build": "vite build",
+    "test": "node --test",
     "preview": "vite preview --host 0.0.0.0",
     "migrate:firebase": "node scripts/migrateToFirebase.js",
     "seed:history": "node scripts/seedHistoricalBookings.js"

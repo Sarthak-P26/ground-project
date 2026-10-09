@@ -2065,17 +2065,69 @@ app.post('/api/auth/reset-password', route(async (req, res) => {
   const token = String(req.body.token || '');
   const password = String(req.body.password || '');
   if (password.length < 6) return res.status(400).json({ message: 'Password must be at least 6 characters.' });
+  if (String(req.body.confirmPassword || '') !== password) {
+    return res.status(400).json({ message: 'The new password and confirmation do not match.' });
+  }
+  if (token) {
+    const result = await withStoreLock(async () => {
+      const store = await readStore();
+      const user = store.users.find((record) => record.passwordReset?.token === token);
+      if (!user || Date.now() >= Number(user.passwordReset.expiresAt)) return false;
+      user.passwordHash = hash(password);
+      user.sessionTokenHash = '';
+      delete user.passwordReset;
+      await writeUsers(store.users);
+      return true;
+    });
+    if (!result) return res.status(400).json({ message: 'This reset link is invalid or has expired.' });
+    return res.json({ message: 'Password reset. You can now log in.' });
+  }
+
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(403).json({ message: 'Direct password reset is disabled in production. Use a verified reset link.' });
+  }
+  if (process.env.TURFCAST_MVP_DIRECT_PASSWORD_RESET !== 'true') {
+    return res.status(403).json({ message: 'Direct password reset is disabled. Enable TURFCAST_MVP_DIRECT_PASSWORD_RESET=true only for a local demo.' });
+  }
+  if (req.body.directReset !== true) {
+    return res.status(400).json({ message: 'A direct demo reset request is required.' });
+  }
+
+  const rawIdentifier = String(req.body.identifier || '').trim();
+  let normalizedIdentifier;
+  if (rawIdentifier.includes('@')) {
+    const email = normalizeEmail(rawIdentifier);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ message: 'Enter a valid registered email address or phone number.' });
+    }
+    normalizedIdentifier = email;
+  } else {
+    const digits = rawIdentifier.replace(/\D/g, '');
+    const supportedPhoneFormat = digits.length === 10
+      || (digits.length === 11 && digits.startsWith('0'))
+      || (digits.length === 12 && digits.startsWith('91'));
+    const phone = normalizePhone(rawIdentifier);
+    if (!supportedPhoneFormat || !/^[6-9]\d{9}$/.test(phone)) {
+      return res.status(400).json({ message: 'Enter a valid registered email address or 10-digit phone number.' });
+    }
+    normalizedIdentifier = phone;
+  }
+
   const result = await withStoreLock(async () => {
     const store = await readStore();
-    const user = store.users.find((record) => record.passwordReset?.token === token);
-    if (!user || Date.now() >= Number(user.passwordReset.expiresAt)) return null;
+    const users = store.users.filter((user) => rawIdentifier.includes('@')
+      ? normalizeEmail(user.email) === normalizedIdentifier
+      : normalizePhone(user.phone) === normalizedIdentifier);
+    if (!users.length) return { status: 404, message: 'No account was found with that registered email or phone number.' };
+    if (users.length > 1) return { status: 409, message: 'More than one account matches that identifier. Contact the turf administrator.' };
+    const user = users[0];
     user.passwordHash = hash(password);
+    user.sessionTokenHash = '';
     delete user.passwordReset;
     await writeUsers(store.users);
-    return true;
+    return { status: 200, message: 'Password updated. You can now log in.' };
   });
-  if (!result) return res.status(400).json({ message: 'This reset link is invalid or has expired.' });
-  res.json({ message: 'Password reset. You can now log in.' });
+  return res.status(result.status).json({ message: result.message });
 }));
 app.put('/api/settings', route(async (req, res) => {
   const store = await withStoreLock(async () => {
@@ -2083,10 +2135,37 @@ app.put('/api/settings', route(async (req, res) => {
     const user = authenticatedUser(current, req);
     if (user?.role !== 'owner') return { status: 403, body: { message: 'Owner access is required to update turf settings.' } };
     const old = current.settings;
-    const settingsInput = req.body;
+    const settingsInput = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
     const price = Object.hasOwn(settingsInput, 'price') ? settingsInput.price : old.price;
     if (!isValidPrice(price)) {
       return { status: 400, body: { message: `Price must be a whole-number INR amount between ₹1 and ₹${MAX_PRICE_INR}.` } };
+    }
+    const durationHours = Number(settingsInput.durationHours ?? old.durationHours);
+    const openHour = Number(settingsInput.openHour ?? old.openHour);
+    const closeHour = Number(settingsInput.closeHour ?? old.closeHour);
+    const bookingWindowDays = Number(settingsInput.bookingWindowDays ?? old.bookingWindowDays);
+    const maxActiveBookingsPerPhone = Number(settingsInput.maxActiveBookingsPerPhone ?? old.maxActiveBookingsPerPhone);
+    if (!Number.isSafeInteger(durationHours) || durationHours < 1) {
+      return { status: 400, body: { message: 'Slot duration must be a whole number of at least one hour.' } };
+    }
+    if (!Number.isSafeInteger(openHour) || openHour < 0 || openHour >= 24) {
+      return { status: 400, body: { message: 'Opening time must be between 12:00 AM and 11:00 PM.' } };
+    }
+    if (!Number.isSafeInteger(closeHour) || closeHour < 1 || closeHour > 24 || closeHour <= openHour) {
+      return { status: 400, body: { message: 'Closing time must be later than opening time. 12:00 AM closing means midnight at the end of the day.' } };
+    }
+    if (durationHours > closeHour - openHour) {
+      return { status: 400, body: { message: 'At least one full booking slot must fit between opening and closing time.' } };
+    }
+    if (!Number.isSafeInteger(bookingWindowDays) || bookingWindowDays < 1) {
+      return { status: 400, body: { message: 'Booking window must be a whole number of at least one day.' } };
+    }
+    if (!Number.isSafeInteger(maxActiveBookingsPerPhone) || maxActiveBookingsPerPhone < 1) {
+      return { status: 400, body: { message: 'Maximum active bookings per phone must be a whole number of at least one.' } };
+    }
+    const maintenanceDates = settingsInput.maintenanceDates ?? old.maintenanceDates ?? [];
+    if (!Array.isArray(maintenanceDates) || maintenanceDates.some((date) => typeof date !== 'string' || !isValidDateValue(date))) {
+      return { status: 400, body: { message: 'Maintenance periods must contain valid dates in YYYY-MM-DD format.' } };
     }
     current.settings = {
       ...old,
@@ -2095,14 +2174,14 @@ app.put('/api/settings', route(async (req, res) => {
         ? settingsInput.turfLocation.trim().slice(0, 120) || old.turfLocation || DEFAULT_TURF_LOCATION
         : old.turfLocation || DEFAULT_TURF_LOCATION,
       price,
-      durationHours: Math.max(1, Number(settingsInput.durationHours)),
-      openHour: Math.max(0, Math.min(23, Number(settingsInput.openHour))),
-      closeHour: Math.max(1, Math.min(24, Number(settingsInput.closeHour))),
+      durationHours,
+      openHour,
+      closeHour,
       sections: Array.isArray(settingsInput.sections) && settingsInput.sections.length ? settingsInput.sections : old.sections,
       sports: Array.isArray(settingsInput.sports) && settingsInput.sports.length ? settingsInput.sports : old.sports,
-      bookingWindowDays: Math.max(1, Number(settingsInput.bookingWindowDays || old.bookingWindowDays)),
-      maxActiveBookingsPerPhone: Math.max(1, Number(settingsInput.maxActiveBookingsPerPhone || old.maxActiveBookingsPerPhone)),
-      maintenanceDates: Array.isArray(settingsInput.maintenanceDates) ? settingsInput.maintenanceDates : old.maintenanceDates,
+      bookingWindowDays,
+      maxActiveBookingsPerPhone,
+      maintenanceDates: [...new Set(maintenanceDates)].sort(),
     };
     await writeStore(current);
     return { status: 200, body: publicStore(current) };

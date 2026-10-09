@@ -11,6 +11,7 @@ A full web app for booking a college turf split into four playable sections. It 
 - Owner dashboard for all bookings, payment collection, revenue, occupancy, settings, and demand analytics
 - File-backed user accounts with hashed passwords
 - Password recovery emails with one-time links that expire after 15 minutes
+- Local MVP direct password reset is disabled by default and never available in production
 - Three-hour slots at Rs. 600 by default
 - Configurable price, duration, open hours, close hours, sports, and section names
 - Shared Node API with file-backed storage in `data/store.json`
@@ -56,15 +57,22 @@ To move an existing file-backed store into Firebase, run `npm run migrate:fireba
 after configuring the credentials. Public REST demo mode is available only when
 `FIREBASE_ALLOW_PUBLIC_REST=true`; do not use it for production.
 
-### Configure Gmail password recovery
+### Configure password recovery
 
-Password reset emails use Gmail SMTP. In `.env`, set `SMTP_USER` to the Gmail address
-that will send messages and `SMTP_APP_PASSWORD` to a Google App Password for that
-account (requires 2-Step Verification). Do not use your normal Gmail password or
-commit `.env`. `APP_BASE_URL` should be the public URL users visit; it defaults to
+In local MVP mode, the password recovery form can reset an account directly by its
+registered email or phone number. This is intended only for a disposable local demo:
+it does not verify account ownership. Direct reset is disabled by default. To opt in,
+set `TURFCAST_MVP_DIRECT_PASSWORD_RESET=true` in the local `.env` and restart the
+server. The server rejects this mode whenever `NODE_ENV=production`; do not enable it
+for shared or deployed environments. Use demo credentials only.
+
+For verified email recovery, configure Gmail SMTP. In `.env`, set `SMTP_USER` to the
+Gmail address that will send messages and `SMTP_APP_PASSWORD` to a Google App Password
+for that account (requires 2-Step Verification). Do not use your normal Gmail password
+or commit `.env`. `APP_BASE_URL` should be the public URL users visit; it defaults to
 `http://localhost:4173`. Restart the server after changing these settings. Until SMTP
-credentials are configured, password recovery will report that email is unavailable
-instead of implying that a message was sent.
+credentials are configured, email recovery reports that email is unavailable instead
+of implying that a message was sent.
 
 ### Owner AI assistant and recommendations
 
@@ -118,8 +126,16 @@ data does not change prices or bookings.
 
 ## Change Rules
 
-Owners can use Turf Settings to change the base fee, slot duration, timings, sports,
-section names, booking window, active-booking limit, and maintenance dates. New bookings
-keep the price that was active when they were created. The Pricing page can set a
-manual or promotional price for an upcoming date, section, and time slot; resetting
-that slot restores the default price. Only authenticated owners can manage prices.
+Owners can use Turf Settings to change the base fee, slot duration, opening and closing
+times, sports, section names, booking window, active-booking limit, and maintenance
+periods. Maintenance ranges block every date from the selected start through end date,
+inclusive. New bookings keep the price that was active when they were created. The
+Pricing page can set a manual or promotional price for an upcoming date, section, and
+time slot; the upcoming list excludes expired times and resetting a slot restores the
+default price. Only authenticated owners can manage prices.
+
+The owner sales CSV is an aggregate daily report, not a personal booking export. Its
+columns are Date, Total Bookings, Confirmed Bookings, Cancelled/Refunded Bookings,
+Confirmed Players, Booking Value (INR), Collected Revenue (INR), and Pending Amount
+(INR), followed by a TOTAL row. Cancelled and refunded bookings are excluded from
+confirmed value, revenue, pending amount, and player totals.

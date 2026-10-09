@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { createPortal } from 'react-dom';
 import {
   Activity,
   ArrowRight,
@@ -40,6 +41,8 @@ import {
 } from 'lucide-react';
 import { Bar, BarChart as RechartsBarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import turfImage from './assets/four-section-turf.png';
+import { isValidMaintenanceDate, maintenanceDatesFromPeriods, maintenancePeriodsFromDates } from './maintenancePeriods.js';
+import { buildSalesReportCsv } from './salesReport.js';
 import './styles.css';
 
 const STORAGE_KEYS = {
@@ -208,6 +211,10 @@ function formatHour(hour) {
     hour: 'numeric',
     minute: '2-digit',
   }).format(date);
+}
+
+function formatClosingHour(hour) {
+  return Number(hour) === 24 ? '12:00 am (end of day)' : formatHour(hour);
 }
 
 function currency(value) {
@@ -445,6 +452,23 @@ function App() {
     error: studentWeatherError,
     retry: retryStudentWeather,
   } = useWeatherForecast(activeDate, studentWeatherHour, currentUser?.role === 'student');
+
+  useEffect(() => {
+    const shell = document.querySelector('.app-shell');
+    const header = shell?.querySelector('.topbar');
+    if (!shell || !header) return undefined;
+
+    const updateNavigationOffset = () => {
+      shell.style.setProperty(
+        '--sticky-navigation-top',
+        `${Math.ceil(header.getBoundingClientRect().height + 24)}px`,
+      );
+    };
+    updateNavigationOffset();
+    const observer = new ResizeObserver(updateNavigationOffset);
+    observer.observe(header);
+    return () => observer.disconnect();
+  }, [currentUser?.id, isOwner]);
 
   const myBookings = currentUser
     ? bookings
@@ -896,70 +920,14 @@ function App() {
   }
 
   function exportBookings() {
-    const csvNumber = (value) => {
-      if (value === null || value === undefined || value === '') return '';
-      const number = Number(value);
-      return Number.isFinite(number) ? number : '';
-    };
-    const headers = [
-      'Booking ID',
-      'Booking Date',
-      'Start Time',
-      'End Time',
-      'Section',
-      'Sport',
-      'Student Name',
-      'Phone Number',
-      'College ID',
-      'Players',
-      'Price (INR)',
-      'Payment Mode',
-      'Payment Status',
-      'Booking Status',
-      'Notes',
-      'Created At',
-    ];
-    const rows = bookings.map((booking) => [
-      booking.id,
-      formatDate(booking.date),
-      formatHour(booking.startHour),
-      formatHour(booking.endHour),
-      booking.section,
-      booking.sport,
-      booking.playerName,
-      booking.phone,
-      booking.collegeId,
-      csvNumber(booking.teamSize),
-      csvNumber(booking.price),
-      booking.paymentMode || 'Pay at venue',
-      booking.paymentStatus === 'paid'
-        ? 'Paid'
-        : booking.paymentStatus === 'refunded' || booking.paymentStatus === 'cancelled'
-          ? 'Refunded'
-          : 'Unpaid',
-      booking.cancelledAt ? 'Cancelled' : 'Confirmed',
-      booking.notes,
-      booking.createdAt && Number.isFinite(new Date(booking.createdAt).getTime())
-        ? new Date(booking.createdAt).toLocaleString('en-IN')
-        : '',
-    ]);
-
-    const csvCell = (cell) => {
-      const value = String(cell ?? '').replace(/\r\n?|\n/g, ' ');
-      const safeValue = /^[\s\uFEFF]*[=+\-@]/.test(value) ? `'${value}` : value;
-      return `"${safeValue.replaceAll('"', '""')}"`;
-    };
-    const csv = [headers, ...rows]
-      .map((row) => row.map((cell) => typeof cell === 'number' ? String(cell) : csvCell(cell)).join(','))
-      .join('\n');
-
+    const csv = buildSalesReportCsv(bookings);
     const blob = new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `turf-bookings-${toDateInput(new Date())}.csv`;
+    link.download = `turf-sales-report-${toDateInput(new Date())}.csv`;
     link.click();
-    URL.revokeObjectURL(url);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   if (!currentUser) {
@@ -1162,7 +1130,7 @@ function App() {
               <p>Choose a slot</p>
               <h2>Available slots · {formatDate(activeDate)}</h2>
             </div>
-            <span>{isBlockedDate(settings, activeDate) ? 'Maintenance blocked' : `${formatHour(settings.openHour)} to ${formatHour(settings.closeHour)}`}</span>
+            <span>{isBlockedDate(settings, activeDate) ? 'Maintenance blocked' : `${formatHour(settings.openHour)} to ${formatClosingHour(settings.closeHour)}`}</span>
           </div>
 
           {isBlockedDate(settings, activeDate) ? (
@@ -1503,15 +1471,27 @@ function AuthStat({ label, value }) {
 
 function AuthPanel({ mode, authError, authNotice, authLoading, role, onRoleChange, onModeChange, onSubmit }) {
   const isSignup = mode === 'signup';
-  const panelTitle = mode === 'forgot' ? 'Reset your TurfCast password' : mode === 'reset' ? 'Choose a new password' : isSignup ? 'Create your TurfCast account' : 'Login to book your slot';
-  const panelKicker = mode === 'forgot' ? 'Account Recovery' : mode === 'reset' ? 'Secure Reset' : isSignup ? 'New Player' : 'Welcome Back';
+  const isDirectReset = mode === 'forgot' && import.meta.env.DEV;
+  const isEmailResetRequest = mode === 'forgot' && !import.meta.env.DEV;
+  const isTokenReset = mode === 'reset';
+  const isPasswordRecovery = isDirectReset || isTokenReset;
+  const isRecoveryMode = isPasswordRecovery || isEmailResetRequest;
+  const [localError, setLocalError] = useState('');
+  const panelTitle = isEmailResetRequest ? 'Request a password reset link' : isDirectReset ? 'Reset your TurfCast password' : isTokenReset ? 'Choose a new password' : isSignup ? 'Create your TurfCast account' : 'Login to book your slot';
+  const panelKicker = isRecoveryMode ? 'Account Recovery' : isSignup ? 'New Player' : 'Welcome Back';
 
   async function handleSubmit(event) {
     event.preventDefault();
+    setLocalError('');
     const formData = new FormData(event.currentTarget);
     const payload = Object.fromEntries(formData.entries());
-    if (mode === 'forgot') await onSubmit('forgot-password', payload);
-    else if (mode === 'reset') await onSubmit('reset-password', { ...payload, token: new URLSearchParams(window.location.search).get('reset') });
+    if (isPasswordRecovery && payload.password !== payload.confirmPassword) {
+      setLocalError('The new password and confirmation do not match.');
+      return;
+    }
+    if (isDirectReset) await onSubmit('reset-password', { ...payload, directReset: true });
+    else if (isEmailResetRequest) await onSubmit('forgot-password', { identifier: payload.identifier });
+    else if (isTokenReset) await onSubmit('reset-password', { ...payload, token: new URLSearchParams(window.location.search).get('reset') });
     else await onSubmit(isSignup ? 'signup' : 'login', payload);
   }
 
@@ -1527,7 +1507,36 @@ function AuthPanel({ mode, authError, authNotice, authLoading, role, onRoleChang
         </div>
       </div>
 
-      {mode === 'forgot' ? <><label>Email or Phone<div className="input-with-icon"><Mail size={18} /><input name="identifier" type="text" placeholder="email or phone" /></div></label><p className="demo-link">{authNotice || 'We’ll email a password reset link to the address on your account.'}</p></> : mode === 'reset' ? <label>New Password<div className="input-with-icon"><Lock size={18} /><input name="password" type="password" placeholder="At least 6 characters" /></div></label> : <>
+      {isPasswordRecovery ? <>
+        {isDirectReset && <label>
+          Registered email or phone
+          <div className="input-with-icon">
+            <Mail size={18} />
+            <input name="identifier" type="text" autoComplete="username" placeholder="Registered email or phone" required />
+          </div>
+        </label>}
+        <label>
+          New password
+          <div className="input-with-icon">
+            <Lock size={18} />
+            <input name="password" type="password" autoComplete="new-password" minLength={6} placeholder="At least 6 characters" required />
+          </div>
+        </label>
+        <label>
+          Confirm new password
+          <div className="input-with-icon">
+            <Lock size={18} />
+            <input name="confirmPassword" type="password" autoComplete="new-password" minLength={6} placeholder="Re-enter your new password" required />
+          </div>
+        </label>
+        {isDirectReset && <p className="demo-link"><strong>MVP notice:</strong> Email verification is not enabled during this initial demo. You can reset your account password directly. Please use a demo password, not your personal password.</p>}
+      </> : isEmailResetRequest ? <label>
+        Registered email or phone
+        <div className="input-with-icon">
+          <Mail size={18} />
+          <input name="identifier" type="text" autoComplete="username" placeholder="Registered email or phone" required />
+        </div>
+      </label> : <>
       <label>Account type<div className="input-with-icon"><ShieldCheck size={18} /><select name="role" value={role} onChange={(event) => onRoleChange(event.target.value)}><option value="student">Student / Customer</option><option value="owner">Turf Admin / Owner</option></select></div></label>
       {isSignup ? (
         <>
@@ -1575,28 +1584,30 @@ function AuthPanel({ mode, authError, authNotice, authLoading, role, onRoleChang
       )}
       </>}
 
-      {mode !== 'forgot' && mode !== 'reset' && <label>
+      {!isRecoveryMode && <label>
         Password
         <div className="input-with-icon">
           <Lock size={18} />
-          <input name="password" type="password" placeholder="At least 6 characters" />
+          <input name="password" type="password" autoComplete={isSignup ? 'new-password' : 'current-password'} placeholder="At least 6 characters" required />
         </div>
       </label>}
 
-      {authError && <p className="form-error">{authError}</p>}
-      {authNotice && mode !== 'forgot' && <p className="demo-link">{authNotice}</p>}
+      {(localError || authError) && <p className="form-error" role="alert">{localError || authError}</p>}
+      {authNotice && !isDirectReset && <p className="demo-link" role="status">{authNotice}</p>}
 
       <button className="primary-button glow-button auth-submit" type="submit" disabled={authLoading}>
         {isSignup ? <UserPlus size={18} /> : <LogIn size={18} />}
-        <span>{authLoading ? 'Working' : mode === 'forgot' ? 'Send reset email' : mode === 'reset' ? 'Set new password' : isSignup ? 'Create Account' : 'Login'}</span>
+        <span>{authLoading ? 'Working' : isPasswordRecovery ? 'Update Password' : isEmailResetRequest ? 'Send Reset Link' : isSignup ? 'Create Account' : 'Login'}</span>
       </button>
 
-      <p className="auth-switch">
+      {isRecoveryMode ? <p className="auth-switch">
+        <button type="button" onClick={() => onModeChange('login')}>Return to Login</button>
+      </p> : <p className="auth-switch">
         {isSignup ? 'Already have an account?' : 'Need a player account?'}
         <button type="button" onClick={() => onModeChange(isSignup ? 'login' : 'signup')}>
           {isSignup ? 'Login' : 'Sign up'}
         </button>
-      </p>
+      </p>}
       {mode === 'login' && <button className="text-button" type="button" onClick={() => onModeChange('forgot')}>Forgot Password?</button>}
     </form>
   );
@@ -2454,7 +2465,12 @@ function OwnerPricing({
 
   const selectedOverride = activeSlotPrice(priceOverrides, slotDate, section, Number(startHour));
   const upcomingOverrides = priceOverrides
-    .filter((override) => override.active && override.date >= today && override.date <= latestDate)
+    .filter((override) => override.active
+      && override.date >= today
+      && override.date <= latestDate
+      && settings.sections.includes(override.section)
+      && slots.includes(Number(override.startHour))
+      && isFutureBookingSlot(override.date, Number(override.startHour)))
     .sort((a, b) => `${a.date}-${a.startHour}-${a.section}`.localeCompare(`${b.date}-${b.startHour}-${b.section}`));
   const dateSlots = slots.filter((hour) => isFutureBookingSlot(slotDate, hour));
 
@@ -2794,7 +2810,7 @@ function OwnerTurfSettings({ settings, onEdit }) {
     ['Turf city / location', settings.turfLocation || 'Not configured'],
     ['Base price', currency(settings.price)],
     ['Slot duration', `${settings.durationHours} hours`],
-    ['Opening hours', `${formatHour(settings.openHour)}–${formatHour(settings.closeHour)}`],
+    ['Opening hours', `${formatHour(settings.openHour)}–${formatClosingHour(settings.closeHour)}`],
     ['Sports', settings.sports.join(', ') || 'None configured'],
     ['Sections', settings.sections.join(', ') || 'None configured'],
     ['Booking window', `${settings.bookingWindowDays} days`],
@@ -3094,124 +3110,217 @@ function CancellationConfirmModal({ booking, onClose, onConfirm }) {
 }
 
 function SettingsModal({ settings, onClose, onSave }) {
-  const [draft, setDraft] = useState(settings);
-  const [error, setError] = useState('');
+  const [draft, setDraft] = useState(() => ({
+    ...settings,
+    sections: [...settings.sections],
+    sports: [...settings.sports],
+  }));
+  const [maintenancePeriods, setMaintenancePeriods] = useState(() => maintenancePeriodsFromDates(settings.maintenanceDates));
+  const [errors, setErrors] = useState({});
   const [saving, setSaving] = useState(false);
-  const dialogRef = useDialogAccessibility(onClose, true, !saving);
+  const initialSnapshot = useRef(JSON.stringify({ draft, maintenancePeriods }));
+  const currentSnapshot = JSON.stringify({ draft, maintenancePeriods });
+  const hasUnsavedChanges = currentSnapshot !== initialSnapshot.current;
+
+  function requestClose() {
+    if (!saving && hasUnsavedChanges && !window.confirm('Discard your unsaved turf setting changes?')) return;
+    onClose();
+  }
+
+  const dialogRef = useDialogAccessibility(requestClose, true, !saving);
 
   function setNumber(key, value) {
-    setDraft((current) => ({ ...current, [key]: Number(value) }));
+    setDraft((current) => ({ ...current, [key]: value === '' ? '' : Number(value) }));
   }
 
   function setList(key, value) {
-    const items = value
-      .split(',')
-      .map((item) => item.trim())
-      .filter(Boolean);
+    const items = value.split(',').map((item) => item.trim()).filter(Boolean);
     setDraft((current) => ({ ...current, [key]: items }));
+  }
+
+  function updateMaintenancePeriod(index, key, value) {
+    setMaintenancePeriods((current) => current.map((period, periodIndex) =>
+      periodIndex === index ? { ...period, [key]: value } : period,
+    ));
   }
 
   async function handleSubmit(event) {
     event.preventDefault();
     if (saving) return;
+    const nextErrors = {};
+    const price = Number(draft.price);
+    const durationHours = Number(draft.durationHours);
+    const openHour = Number(draft.openHour);
+    const closeHour = Number(draft.closeHour);
+    const bookingWindowDays = Number(draft.bookingWindowDays);
+    const maxActiveBookingsPerPhone = Number(draft.maxActiveBookingsPerPhone);
+
+    if (!Number.isSafeInteger(price) || price < 1 || price > 100000) {
+      nextErrors.price = 'Enter a whole-number price from ₹1 to ₹100,000.';
+    }
+    if (!Number.isSafeInteger(durationHours) || durationHours < 1) {
+      nextErrors.durationHours = 'Slot duration must be a whole number of at least one hour.';
+    }
+    if (!Number.isSafeInteger(openHour) || openHour < 0 || openHour >= 24) {
+      nextErrors.openHour = 'Choose an opening time from 12:00 AM to 11:00 PM.';
+    }
+    if (!Number.isSafeInteger(closeHour) || closeHour < 1 || closeHour > 24 || closeHour <= openHour) {
+      nextErrors.closeHour = 'Closing time must be later than opening time.';
+    } else if (Number.isSafeInteger(openHour) && Number.isSafeInteger(durationHours) && durationHours > closeHour - openHour) {
+      nextErrors.closeHour = 'At least one full booking slot must fit before closing.';
+    }
+    if (!Number.isSafeInteger(bookingWindowDays) || bookingWindowDays < 1) {
+      nextErrors.bookingWindowDays = 'Enter a whole number of at least one day.';
+    }
+    if (!Number.isSafeInteger(maxActiveBookingsPerPhone) || maxActiveBookingsPerPhone < 1) {
+      nextErrors.maxActiveBookingsPerPhone = 'Enter a whole number of at least one booking.';
+    }
+    maintenancePeriods.forEach((period, index) => {
+      if (!isValidMaintenanceDate(period.startDate) || !isValidMaintenanceDate(period.endDate)) {
+        nextErrors[`maintenance-${index}`] = 'Choose both a valid start and end date.';
+      } else if (period.endDate < period.startDate) {
+        nextErrors[`maintenance-${index}`] = 'End date must be the same as or later than the start date.';
+      }
+    });
+    if (Object.keys(nextErrors).length) {
+      setErrors(nextErrors);
+      return;
+    }
+
     const safeSettings = {
       ...draft,
-      price: Math.max(1, Number(draft.price)),
+      price,
       turfLocation: String(draft.turfLocation || '').trim().slice(0, 120) || settings.turfLocation || DEFAULT_SETTINGS.turfLocation,
-      durationHours: Math.max(1, Number(draft.durationHours)),
-      openHour: Math.max(0, Math.min(23, Number(draft.openHour))),
-      closeHour: Math.max(1, Math.min(24, Number(draft.closeHour))),
-      bookingWindowDays: Math.max(1, Number(draft.bookingWindowDays)),
-      maxActiveBookingsPerPhone: Math.max(1, Number(draft.maxActiveBookingsPerPhone)),
+      durationHours,
+      openHour,
+      closeHour,
+      bookingWindowDays,
+      maxActiveBookingsPerPhone,
       sections: draft.sections.length ? draft.sections : DEFAULT_SETTINGS.sections,
       sports: draft.sports.length ? draft.sports : DEFAULT_SETTINGS.sports,
-      maintenanceDates: draft.maintenanceDates || [],
+      maintenanceDates: maintenanceDatesFromPeriods(maintenancePeriods),
     };
     setSaving(true);
-    setError('');
+    setErrors({});
     try {
       const saved = await onSave(safeSettings);
-      if (!saved) setError('Settings were not saved. Check the server connection and try again.');
+      if (!saved) setErrors({ form: 'Settings were not saved. Check the server connection and try again.' });
     } catch (saveError) {
-      setError(saveError.message || 'Settings could not be saved.');
+      setErrors({ form: saveError.message || 'Settings could not be saved.' });
     } finally {
       setSaving(false);
     }
   }
 
+  function hourLabel(hour, isClosing = false) {
+    return isClosing ? formatClosingHour(hour) : formatHour(hour);
+  }
+
   return (
     <div className="modal-backdrop">
-      <form className="modal" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="settings-dialog-title" tabIndex={-1} onSubmit={handleSubmit}>
+      <form className="modal settings-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="settings-dialog-title" tabIndex={-1} onSubmit={handleSubmit}>
         <div className="modal-header">
           <div>
             <p>Ground Rules</p>
-            <h2 id="settings-dialog-title">Settings</h2>
+            <h2 id="settings-dialog-title">Edit Turf Settings</h2>
           </div>
-          <button className="icon-button" type="button" onClick={onClose} title="Close" aria-label="Close settings" disabled={saving}>
+          <button className="icon-button" type="button" onClick={requestClose} title="Close" aria-label="Close settings" disabled={saving}>
             <X size={20} />
           </button>
         </div>
 
-        <div className="form-grid">
+        <fieldset className="settings-group">
+          <legend>Turf and pricing</legend>
+          <p className="settings-group-help">Set the turf details and the default price used when a slot has no active custom price.</p>
           <label className="settings-location-field">
-            Turf city / location
-            <input
-              type="text"
-              maxLength="120"
-              placeholder="e.g. Dharashiv, Maharashtra"
-              value={draft.turfLocation || ''}
-              onChange={(event) => setDraft((current) => ({ ...current, turfLocation: event.target.value }))}
-            />
+            Turf location
+            <input type="text" maxLength="120" placeholder="e.g. Dharashiv, Maharashtra" value={draft.turfLocation || ''} onChange={(event) => setDraft((current) => ({ ...current, turfLocation: event.target.value }))} />
+          </label>
+          <div className="settings-fields-grid">
+            <label>
+              Default price in INR
+              <input type="number" min="1" max="100000" step="1" value={draft.price} aria-invalid={Boolean(errors.price)} aria-describedby={errors.price ? 'settings-price-error' : 'settings-price-help'} onChange={(event) => setNumber('price', event.target.value)} />
+              {errors.price ? <small className="settings-field-error" id="settings-price-error">{errors.price}</small> : <small className="settings-field-help" id="settings-price-help">Applies whenever a slot has no active custom price.</small>}
+            </label>
+            <label>
+              Slot duration
+              <input type="number" min="1" max="24" step="1" value={draft.durationHours} aria-invalid={Boolean(errors.durationHours)} aria-describedby={errors.durationHours ? 'settings-duration-error' : 'settings-duration-help'} onChange={(event) => setNumber('durationHours', event.target.value)} />
+              {errors.durationHours ? <small className="settings-field-error" id="settings-duration-error">{errors.durationHours}</small> : <small className="settings-field-help" id="settings-duration-help">Determines how long each booking lasts, in hours.</small>}
+            </label>
+          </div>
+          <label>
+            Sports
+            <input value={draft.sports.join(', ')} onChange={(event) => setList('sports', event.target.value)} />
           </label>
           <label>
-            Price
-            <input type="number" min="1" value={draft.price} onChange={(event) => setNumber('price', event.target.value)} />
+            Sections
+            <input value={draft.sections.join(', ')} onChange={(event) => setList('sections', event.target.value)} />
           </label>
-          <label>
-            Duration Hours
-            <input type="number" min="1" value={draft.durationHours} onChange={(event) => setNumber('durationHours', event.target.value)} />
-          </label>
-          <label>
-            Open Hour
-            <input type="number" min="0" max="23" value={draft.openHour} onChange={(event) => setNumber('openHour', event.target.value)} />
-          </label>
-          <label>
-            Close Hour
-            <input type="number" min="1" max="24" value={draft.closeHour} onChange={(event) => setNumber('closeHour', event.target.value)} />
-          </label>
-          <label>
-            Booking Window Days
-            <input type="number" min="1" value={draft.bookingWindowDays} onChange={(event) => setNumber('bookingWindowDays', event.target.value)} />
-          </label>
-          <label>
-            Max Active Per Phone
-            <input type="number" min="1" value={draft.maxActiveBookingsPerPhone} onChange={(event) => setNumber('maxActiveBookingsPerPhone', event.target.value)} />
-          </label>
-        </div>
+        </fieldset>
 
-        <label>
-          Sections
-          <input value={draft.sections.join(', ')} onChange={(event) => setList('sections', event.target.value)} />
-        </label>
+        <fieldset className="settings-group">
+          <legend>Booking rules</legend>
+          <div className="settings-fields-grid">
+            <label>
+              How many days ahead can students book?
+              <input type="number" min="1" step="1" value={draft.bookingWindowDays} aria-invalid={Boolean(errors.bookingWindowDays)} aria-describedby={errors.bookingWindowDays ? 'settings-window-error' : 'settings-window-help'} onChange={(event) => setNumber('bookingWindowDays', event.target.value)} />
+              {errors.bookingWindowDays ? <small className="settings-field-error" id="settings-window-error">{errors.bookingWindowDays}</small> : <small className="settings-field-help" id="settings-window-help">For example, 14 days allows bookings within the next 14 days.</small>}
+            </label>
+            <label>
+              Maximum active bookings per phone
+              <input type="number" min="1" step="1" value={draft.maxActiveBookingsPerPhone} aria-invalid={Boolean(errors.maxActiveBookingsPerPhone)} aria-describedby={errors.maxActiveBookingsPerPhone ? 'settings-phone-limit-error' : 'settings-phone-limit-help'} onChange={(event) => setNumber('maxActiveBookingsPerPhone', event.target.value)} />
+              {errors.maxActiveBookingsPerPhone ? <small className="settings-field-error" id="settings-phone-limit-error">{errors.maxActiveBookingsPerPhone}</small> : <small className="settings-field-help" id="settings-phone-limit-help">Limits active reservations associated with one phone number.</small>}
+            </label>
+          </div>
+        </fieldset>
 
-        <label>
-          Sports
-          <input value={draft.sports.join(', ')} onChange={(event) => setList('sports', event.target.value)} />
-        </label>
+        <fieldset className="settings-group">
+          <legend>Opening hours</legend>
+          <p className="settings-group-help">Choose whole-hour times. A closing time of 12:00 AM means midnight at the end of that day.</p>
+          <div className="settings-fields-grid">
+            <label>
+              Opening time
+              <select value={draft.openHour} aria-invalid={Boolean(errors.openHour)} onChange={(event) => setNumber('openHour', event.target.value)}>
+                {Array.from({ length: 24 }, (_, hour) => <option value={hour} key={hour}>{hourLabel(hour)}</option>)}
+              </select>
+              {errors.openHour && <small className="settings-field-error">{errors.openHour}</small>}
+            </label>
+            <label>
+              Closing time
+              <select value={draft.closeHour} aria-invalid={Boolean(errors.closeHour)} onChange={(event) => setNumber('closeHour', event.target.value)}>
+                {Array.from({ length: 24 }, (_, index) => index + 1).map((hour) => <option value={hour} key={hour}>{hourLabel(hour, true)}</option>)}
+              </select>
+              {errors.closeHour && <small className="settings-field-error">{errors.closeHour}</small>}
+            </label>
+          </div>
+        </fieldset>
 
-        <label>
-          Maintenance Dates
-          <input
-            placeholder="2026-05-01, 2026-05-08"
-            value={(draft.maintenanceDates || []).join(', ')}
-            onChange={(event) => setList('maintenanceDates', event.target.value)}
-          />
-        </label>
+        <fieldset className="settings-group maintenance-settings-group">
+          <legend>Maintenance periods</legend>
+          <p className="settings-group-help">Slots are unavailable from the start date through the end date. Bookings reopen the following day.</p>
+          <div className="maintenance-period-list">
+            {maintenancePeriods.map((period, index) => (
+              <div className="maintenance-period-row" key={`${period.startDate}-${period.endDate}-${index}`}>
+                <label>
+                  Start date
+                  <input type="date" value={period.startDate} aria-invalid={Boolean(errors[`maintenance-${index}`])} onChange={(event) => updateMaintenancePeriod(index, 'startDate', event.target.value)} />
+                </label>
+                <label>
+                  End date
+                  <input type="date" value={period.endDate} aria-invalid={Boolean(errors[`maintenance-${index}`])} onChange={(event) => updateMaintenancePeriod(index, 'endDate', event.target.value)} />
+                </label>
+                <button className="owner-action-button danger maintenance-remove-button" type="button" onClick={() => setMaintenancePeriods((current) => current.filter((_, periodIndex) => periodIndex !== index))} aria-label={`Remove maintenance period ${index + 1}`} disabled={saving}>Remove</button>
+                {errors[`maintenance-${index}`] && <small className="settings-field-error maintenance-period-error">{errors[`maintenance-${index}`]}</small>}
+              </div>
+            ))}
+          </div>
+          <button className="ghost-button maintenance-add-button" type="button" onClick={() => setMaintenancePeriods((current) => [...current, { startDate: '', endDate: '' }])} disabled={saving}>Add maintenance period</button>
+        </fieldset>
 
-        {error && <p className="form-error" role="alert">{error}</p>}
+        {errors.form && <p className="form-error" role="alert">{errors.form}</p>}
 
         <div className="modal-actions">
-          <button className="ghost-button" type="button" onClick={onClose} disabled={saving}>Cancel</button>
+          <button className="ghost-button" type="button" onClick={requestClose} disabled={saving}>Cancel</button>
           <button className="primary-button" type="submit" disabled={saving}>
             <Save size={18} />
             <span>{saving ? 'Saving' : 'Save Settings'}</span>
@@ -3229,53 +3338,76 @@ function ReceiptModal({ booking, confirmed = false, student = false, onClose }) 
     window.print();
   }
 
-  return (
-    <div className="modal-backdrop">
-      <section className="modal receipt-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="receipt-dialog-title" tabIndex={-1}>
-        <div className="modal-header no-print">
-          <div>
-            <p>{confirmed ? 'Booking confirmed' : student ? 'Booking details' : 'Booking receipt'}</p>
-            <h2 id="receipt-dialog-title">{confirmed ? 'You’re all set!' : booking.id}</h2>
-          </div>
-          <button className="icon-button" type="button" onClick={onClose} title="Close" aria-label="Close booking receipt">
-            <X size={20} />
-          </button>
-        </div>
-        {confirmed && <p className="confirmation-note">Your slot is reserved. You can find it anytime in My Bookings.</p>}
-        <div className="receipt-card">
-          <div className="receipt-top">
-            <div className="brand-mark">
-              <ClipboardCheck size={24} />
-            </div>
-            <div>
-              <p>{student ? 'TurfCast · College Turf' : 'TurfCast · College Sports Desk'}</p>
-              <h3>{student ? booking.sport : booking.playerName}</h3>
-            </div>
-          </div>
-          <div className="receipt-grid">
-            <ReceiptItem label="Date" value={formatDate(booking.date)} />
-            <ReceiptItem label="Time" value={`${formatHour(booking.startHour)}-${formatHour(booking.endHour)}`} />
-            <ReceiptItem label="Section" value={booking.section} />
-            <ReceiptItem label="Sport" value={booking.sport} />
-            {!student && <ReceiptItem label="Phone" value={booking.phone} />}
-            {!student && <ReceiptItem label="College ID" value={booking.collegeId || 'Not added'} />}
-            {!student && <ReceiptItem label="Players" value={booking.teamSize} />}
-            {!student && <ReceiptItem label="Payment" value={booking.paymentMode || 'Pending'} />}
-          </div>
-          <div className="receipt-total">
-            <span>Total</span>
-            <strong>{currency(booking.price)}</strong>
-          </div>
-        </div>
-        <div className="modal-actions no-print">
-          <button className="ghost-button" type="button" onClick={onClose}>Close</button>
-          <button className="primary-button" type="button" onClick={printReceipt}>
-            <Printer size={18} />
-            <span>Print</span>
-          </button>
-        </div>
-      </section>
+  const bookingStatus = booking.cancelledAt
+    ? 'Cancelled'
+    : String(booking.paymentStatus || '').toLowerCase() === 'paid'
+      ? 'Confirmed · Paid'
+      : 'Confirmed · Payment pending';
+  const printableReceipt = (
+    <div id="receipt-print-root" aria-hidden="true">
+      <article className="receipt-print-ticket">
+        <p className="receipt-print-brand">TurfCast · College Sports Desk</p>
+        <h1>Booking receipt</h1>
+        <p className="receipt-print-id">Booking ID · {booking.id}</p>
+        <dl>
+          <div><dt>Date</dt><dd>{formatDate(booking.date)}</dd></div>
+          <div><dt>Time</dt><dd>{formatHour(booking.startHour)}–{formatHour(booking.endHour)}</dd></div>
+          <div><dt>Section</dt><dd>{booking.section}</dd></div>
+          <div><dt>Sport</dt><dd>{booking.sport}</dd></div>
+          <div><dt>Status</dt><dd>{bookingStatus}</dd></div>
+        </dl>
+        <div className="receipt-print-total"><span>Total</span><strong>{currency(booking.price)}</strong></div>
+      </article>
     </div>
+  );
+
+  return (
+    <>
+      <div className="modal-backdrop">
+        <section className="modal receipt-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="receipt-dialog-title" tabIndex={-1}>
+          <div className="modal-header no-print">
+            <div>
+              <p>{confirmed ? 'Booking confirmed' : student ? 'Booking details' : 'Booking receipt'}</p>
+              <h2 id="receipt-dialog-title">{confirmed ? 'You’re all set!' : booking.id}</h2>
+            </div>
+            <button className="icon-button" type="button" onClick={onClose} title="Close" aria-label="Close booking receipt">
+              <X size={20} />
+            </button>
+          </div>
+          {confirmed && <p className="confirmation-note">{booking.cancelledAt ? 'This booking has been cancelled.' : 'Your slot is reserved. You can find it anytime in My Bookings.'}</p>}
+          <div className="receipt-card">
+            <div className="receipt-top">
+              <div className="brand-mark">
+                <ClipboardCheck size={24} />
+              </div>
+              <div>
+                <p>{student ? 'TurfCast · College Turf' : 'TurfCast · College Sports Desk'}</p>
+                <h3>{student ? booking.sport : booking.playerName}</h3>
+              </div>
+            </div>
+            <div className="receipt-grid">
+              <ReceiptItem label="Date" value={formatDate(booking.date)} />
+              <ReceiptItem label="Time" value={`${formatHour(booking.startHour)}-${formatHour(booking.endHour)}`} />
+              <ReceiptItem label="Section" value={booking.section} />
+              <ReceiptItem label="Sport" value={booking.sport} />
+              <ReceiptItem label="Status" value={bookingStatus} />
+            </div>
+            <div className="receipt-total">
+              <span>Total</span>
+              <strong>{currency(booking.price)}</strong>
+            </div>
+          </div>
+          <div className="modal-actions no-print">
+            <button className="ghost-button" type="button" onClick={onClose}>Close</button>
+            <button className="primary-button" type="button" onClick={printReceipt}>
+              <Printer size={18} />
+              <span>Print</span>
+            </button>
+          </div>
+        </section>
+      </div>
+      {createPortal(printableReceipt, document.body)}
+    </>
   );
 }
 
