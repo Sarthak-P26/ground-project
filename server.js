@@ -413,6 +413,10 @@ app.get('/api/ai/owner-recommendations', route(async (req, res) => {
       category = 'permission';
       message = 'Gemini denied this request. Check the API key permissions and Gemini API access.';
       status = 503;
+    } else if (geminiResponse.status >= 500) {
+      category = 'service';
+      message = 'Gemini is temporarily experiencing a service issue. Please try again shortly.';
+      status = 503;
     }
     logGeminiFailure({
       category,
@@ -434,14 +438,21 @@ app.get('/api/ai/owner-recommendations', route(async (req, res) => {
   }
   const candidate = result.candidates?.[0];
   const blockedReason = result.promptFeedback?.blockReason;
-  if (blockedReason || ['SAFETY', 'PROHIBITED_CONTENT', 'BLOCKLIST', 'SPII'].includes(candidate?.finishReason)) {
+  if (blockedReason || ['SAFETY', 'PROHIBITED_CONTENT', 'BLOCKLIST', 'SPII', 'RECITATION', 'MODEL_ARMOR'].includes(candidate?.finishReason)) {
     const reason = blockedReason || candidate.finishReason;
     logGeminiFailure({ category: 'blocked', blockReason: reason });
     return res.status(422).json({ message: 'Gemini could not process this recommendation request. Please try again.' });
   }
+  const responseText = candidate?.content?.parts?.map((part) => part.text || '').join('').trim() || '';
+  if (!responseText) {
+    logGeminiFailure({
+      category: candidate?.finishReason && candidate.finishReason !== 'STOP' ? 'incomplete_response' : 'empty_response',
+      finishReason: candidate?.finishReason || null,
+    });
+    return res.status(502).json({ message: 'Gemini returned no recommendations. Please try again.' });
+  }
   try {
-    const text = candidate?.content?.parts?.map((part) => part.text || '').join('').trim();
-    generated = JSON.parse(text || '');
+    generated = JSON.parse(responseText);
   } catch {
     logGeminiFailure({
       category: candidate?.finishReason && candidate.finishReason !== 'STOP' ? 'incomplete_response' : 'response_parse',
