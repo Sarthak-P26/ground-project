@@ -1413,9 +1413,10 @@ function buildLocalStudentAnswer(intent, context, question) {
   return null;
 }
 
-function selectedScopeMismatch(question, selection, intent, sections) {
-  if (!['availability', 'pricing', 'recommendation', 'weather'].includes(intent)) return '';
+function selectedScopeMismatch(question, selection, intent, settings) {
+  if (!['availability', 'pricing', 'recommendation', 'weather'].includes(intent)) return null;
   const loweredQuestion = question.toLocaleLowerCase('en');
+  const mismatches = [];
   let requestedDate = question.match(/\b20\d{2}-\d{2}-\d{2}\b/)?.[0];
   if (/\btoday\b/.test(loweredQuestion)) requestedDate = today();
   if (/\btomorrow\b/.test(loweredQuestion)) {
@@ -1423,33 +1424,69 @@ function selectedScopeMismatch(question, selection, intent, sections) {
     tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
     requestedDate = tomorrow.toISOString().slice(0, 10);
   }
+  let weekdayIndex = -1;
   if (!requestedDate) {
-    const weekdayIndex = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
+    weekdayIndex = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
       .findIndex((weekday) => new RegExp(`\\b${weekday}\\b`).test(loweredQuestion));
     if (weekdayIndex >= 0) {
       const selectedWeekday = new Date(`${selection.date}T00:00:00.000Z`).getUTCDay();
-      if (selectedWeekday !== weekdayIndex) {
-        return `Your question names a different day. This answer uses the current selection (${selection.date}); change the date in the booking interface to check that day. `;
-      }
+      if (selectedWeekday !== weekdayIndex) requestedDate = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][weekdayIndex];
     }
   }
-  const requestedTime = question.match(/\b(?:at\s*)?(\d{1,2})(?::([0-5]\d))?\s*(am|pm)\b/i);
+  const requestedTime = question.match(/\b(?:at\s*|around\s+|by\s+|from\s+)?(\d{1,2})(?::([0-5]\d))?\s*(am|pm)\b/i) ||
+    question.match(/\b(?:at|around|by|from)\s+(\d{1,2})(?::([0-5]\d))?\b/i);
   const requestedHour24 = question.match(/\b(?:at\s*)?([01]?\d|2[0-3]):[0-5]\d\b/);
   const hasDifferentDate = requestedDate && requestedDate !== selection.date;
-  const requestedSection = sections.find((section) =>
+  if (hasDifferentDate) mismatches.push(`date ${requestedDate}`);
+  const requestedSection = settings.sections.find((section) =>
     new RegExp(`\\b${section.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(question),
   );
-  const hasDifferentSection = selection.section && requestedSection && requestedSection !== selection.section;
+  const hasDifferentSection = requestedSection && requestedSection !== selection.section;
+  if (hasDifferentSection) mismatches.push(`section ${requestedSection}`);
   let requestedHour = null;
   if (requestedTime) {
-    requestedHour = Number(requestedTime[1]) % 12 + (requestedTime[3].toLowerCase() === 'pm' ? 12 : 0);
+    const hour = Number(requestedTime[1]);
+    requestedHour = requestedTime[3]
+      ? hour % 12 + (requestedTime[3].toLowerCase() === 'pm' ? 12 : 0)
+      : hour;
   } else if (requestedHour24) {
     requestedHour = Number(requestedHour24[1]);
   }
-  const hasDifferentTime = selection.hour !== null && requestedHour !== null && requestedHour !== selection.hour;
-  if (!hasDifferentDate && !hasDifferentTime && !hasDifferentSection) return '';
-  const differentSelection = [hasDifferentDate && 'date', hasDifferentTime && 'time', hasDifferentSection && 'section'].filter(Boolean);
-  return `Your question refers to a different ${differentSelection.join('/')}. This answer uses the current selection (${selection.date}${selection.section ? `, ${selection.section} at ${String(selection.hour).padStart(2, '0')}:00` : ''}); change the selection in the booking interface to check the other one. `;
+  const hasDifferentTime = requestedHour !== null && requestedHour !== selection.hour;
+  if (hasDifferentTime) mismatches.push(`time ${String(requestedHour).padStart(2, '0')}:00`);
+
+  const configuredSports = settings.sports;
+  const requestedSportAliases = [
+    ...configuredSports.map((sport) => ({ name: sport, aliases: [sport.toLocaleLowerCase('en')] })),
+    { name: 'Football', aliases: ['soccer'] },
+    ...['badminton', 'basketball', 'tennis', 'hockey', 'volleyball', 'rugby', 'kabaddi', 'baseball', 'squash', 'golf']
+      .map((sport) => ({ name: sport[0].toLocaleUpperCase('en') + sport.slice(1), aliases: [sport] })),
+  ];
+  const requestedSports = [...new Set(requestedSportAliases
+    .filter(({ aliases }) => aliases.some((alias) =>
+      new RegExp(`\\b${alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(question),
+    ))
+    .map(({ name }) => name))];
+  const unsupportedSport = requestedSports.find((requestedSport) =>
+    !configuredSports.some((sport) => sport.toLocaleLowerCase('en') === requestedSport.toLocaleLowerCase('en')),
+  );
+  if (unsupportedSport) {
+    return {
+      answer: `${unsupportedSport} is not configured at this turf. The configured sports are ${configuredSports.join(' and ')}. Select one of those sports in the booking interface to check its slots.`,
+      source: 'local',
+    };
+  }
+  const differentSports = requestedSports.filter((requestedSport) =>
+    requestedSport.toLocaleLowerCase('en') !== String(selection.sport || '').toLocaleLowerCase('en'),
+  );
+  if (differentSports.length) {
+    mismatches.push(`sport ${differentSports.join(' or ')}`);
+  }
+  if (!mismatches.length) return null;
+  return {
+    answer: `Your question asks about ${mismatches.join(', ')}, but the booking interface is currently set to ${selection.date}${selection.sport ? `, ${selection.sport}` : ', no sport'}${selection.section ? `, ${selection.section}` : ', no section'}${selection.hour !== null ? ` at ${String(selection.hour).padStart(2, '0')}:00` : ', no time'}. Please select the requested ${mismatches.join(', ')} in the booking interface first; I haven’t checked or recommended options for that different selection.`,
+    source: 'local',
+  };
 }
 
 const ownerAiSystemInstruction = [
@@ -1682,7 +1719,16 @@ app.post('/api/ai/student-assistant', route(async (req, res) => {
   }
 
   const intent = detectStudentAssistantIntent(question);
-  const selection = { date, sport, section, hour: intent === 'weather' && hour === null ? 18 : hour };
+  const selection = { date, sport, section, hour };
+  const scopeMismatch = selectedScopeMismatch(question, selection, intent, store.settings);
+  if (scopeMismatch) {
+    return res.json({
+      ...scopeMismatch,
+      keyFindings: [],
+      suggestedActions: [],
+    });
+  }
+  if (intent === 'weather' && selection.hour === null) selection.hour = 18;
   const weather = intent === 'weather'
     ? await getWeather(date, selection.hour, store.settings.turfLocation)
     : null;
@@ -1691,7 +1737,6 @@ app.post('/api/ai/student-assistant', route(async (req, res) => {
   if (localAnswer) {
     return res.json({
       ...localAnswer,
-      answer: `${selectedScopeMismatch(question, selection, intent, store.settings.sections)}${localAnswer.answer}`,
       keyFindings: [],
       suggestedActions: [],
     });
