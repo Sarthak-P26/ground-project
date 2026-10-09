@@ -64,6 +64,38 @@ const DEFAULT_SETTINGS = {
   turfLocation: '',
 };
 
+function normalizeSettings(settings) {
+  const input = settings && typeof settings === 'object' && !Array.isArray(settings) ? settings : {};
+  const durationHours = Number(input.durationHours);
+  const openHour = Number(input.openHour);
+  const closeHour = Number(input.closeHour);
+  return {
+    ...DEFAULT_SETTINGS,
+    ...input,
+    price: Number.isSafeInteger(input.price) && input.price > 0 ? input.price : DEFAULT_SETTINGS.price,
+    durationHours: Number.isSafeInteger(durationHours) && durationHours > 0 ? durationHours : DEFAULT_SETTINGS.durationHours,
+    openHour: Number.isSafeInteger(openHour) && openHour >= 0 && openHour < 24 ? openHour : DEFAULT_SETTINGS.openHour,
+    closeHour: Number.isSafeInteger(closeHour) && closeHour > openHour && closeHour <= 24 ? closeHour : DEFAULT_SETTINGS.closeHour,
+    sections: Array.isArray(input.sections) && input.sections.length && input.sections.every((section) => typeof section === 'string')
+      ? input.sections
+      : DEFAULT_SETTINGS.sections,
+    sports: Array.isArray(input.sports) && input.sports.length && input.sports.every((sport) => typeof sport === 'string')
+      ? input.sports
+      : DEFAULT_SETTINGS.sports,
+    maintenanceDates: Array.isArray(input.maintenanceDates) ? input.maintenanceDates : [],
+    bookingWindowDays: Number.isSafeInteger(input.bookingWindowDays) && input.bookingWindowDays > 0
+      ? input.bookingWindowDays
+      : DEFAULT_SETTINGS.bookingWindowDays,
+    turfLocation: typeof input.turfLocation === 'string' ? input.turfLocation : '',
+  };
+}
+
+function normalizeBookings(bookings) {
+  return Array.isArray(bookings)
+    ? bookings.filter((booking) => booking && typeof booking === 'object' && !Array.isArray(booking))
+    : [];
+}
+
 function loadJson(key, fallback) {
   try {
     const stored = localStorage.getItem(key);
@@ -167,9 +199,36 @@ function datePlus(days) {
   return toDateInput(date);
 }
 
+class OwnerWorkspaceErrorBoundary extends React.Component {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error('Owner workspace render failed.', error, errorInfo.componentStack);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <section className="owner-workspace-error" role="alert">
+          <h2>Owner dashboard could not be displayed</h2>
+          <p>An unexpected display error occurred. Your account and bookings have not been changed.</p>
+          <button className="primary-button" type="button" onClick={() => window.location.reload()}>
+            Reload TurfCast
+          </button>
+        </section>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 function App() {
-  const [settings, setSettings] = useState(() => loadJson(STORAGE_KEYS.settings, DEFAULT_SETTINGS));
-  const [bookings, setBookings] = useState(() => loadJson(STORAGE_KEYS.bookings, []));
+  const [settings, setSettings] = useState(() => normalizeSettings(loadJson(STORAGE_KEYS.settings, DEFAULT_SETTINGS)));
+  const [bookings, setBookings] = useState(() => normalizeBookings(loadJson(STORAGE_KEYS.bookings, [])));
   const [priceOverrides, setPriceOverrides] = useState([]);
   const [currentUser, setCurrentUser] = useState(null);
   const [sessionLoading, setSessionLoading] = useState(() => Boolean(loadJson(STORAGE_KEYS.token, '')));
@@ -288,12 +347,13 @@ function App() {
         const response = await fetch('/api/store', { headers: authHeaders() });
         if (!response.ok) throw new Error('Server unavailable');
         const store = await response.json();
-        const mergedSettings = { ...DEFAULT_SETTINGS, ...store.settings };
+        const mergedSettings = normalizeSettings(store.settings);
+        const serverBookings = normalizeBookings(store.bookings);
         setSettings(mergedSettings);
-        setBookings(store.bookings);
-        setPriceOverrides(store.priceOverrides || []);
+        setBookings(serverBookings);
+        setPriceOverrides(Array.isArray(store.priceOverrides) ? store.priceOverrides : []);
         saveJson(STORAGE_KEYS.settings, mergedSettings);
-        saveJson(STORAGE_KEYS.bookings, store.bookings);
+        saveJson(STORAGE_KEYS.bookings, serverBookings);
         setSyncStatus('Live');
       } catch {
         setSyncStatus('Offline');
@@ -304,8 +364,9 @@ function App() {
   }, []);
 
   function persistBookings(nextBookings) {
-    setBookings(nextBookings);
-    saveJson(STORAGE_KEYS.bookings, nextBookings);
+    const safeBookings = normalizeBookings(nextBookings);
+    setBookings(safeBookings);
+    saveJson(STORAGE_KEYS.bookings, safeBookings);
   }
 
   function persistSettings(nextSettings) {
@@ -518,15 +579,17 @@ function App() {
   }
 
   function applyAuthenticatedSession(user, store, sessionToken) {
-    const mergedSettings = { ...DEFAULT_SETTINGS, ...(store?.settings || settings) };
+    const mergedSettings = normalizeSettings(store?.settings || settings);
+    const nextBookings = normalizeBookings(store?.bookings);
+    const nextPriceOverrides = Array.isArray(store?.priceOverrides) ? store.priceOverrides : [];
     setCurrentUser(user);
     setSettings(mergedSettings);
-    setBookings(store?.bookings || bookings);
-    setPriceOverrides(store?.priceOverrides || []);
+    setBookings(nextBookings);
+    setPriceOverrides(nextPriceOverrides);
     saveJson(STORAGE_KEYS.user, user);
     saveJson(STORAGE_KEYS.token, sessionToken);
     saveJson(STORAGE_KEYS.settings, mergedSettings);
-    saveJson(STORAGE_KEYS.bookings, store?.bookings || bookings);
+    saveJson(STORAGE_KEYS.bookings, nextBookings);
     setAuthError('');
   }
 
@@ -741,6 +804,7 @@ function App() {
       </nav>}
 
       {isOwner ? (
+        <OwnerWorkspaceErrorBoundary>
         <OwnerExperience
           page={ownerPage}
           onPageChange={(page) => {
@@ -770,6 +834,7 @@ function App() {
             setReceiptBooking(booking);
           }}
         />
+        </OwnerWorkspaceErrorBoundary>
       ) : <>
       <section className="simple-welcome">
         <div><p>College Turf</p><h2>Book your next game.</h2></div>
@@ -1355,13 +1420,13 @@ function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCanc
     { label: "Today's collected revenue", value: currency(collectedRevenue(todayBookings)) },
     { label: "Today's occupancy", value: `${occupancy}%` },
     { label: 'Upcoming bookings', value: confirmedBookings.filter((booking) =>
-      bookingStartTimestamp(booking.date, booking.startHour) > Date.now(),
+      isFutureBookingSlot(booking.date, booking.startHour),
     ).length },
   ];
   const attentionBookings = confirmedBookings
     .filter((booking) =>
       booking.paymentStatus === 'unpaid' &&
-      bookingStartTimestamp(booking.date, booking.startHour) > Date.now(),
+      isFutureBookingSlot(booking.date, booking.startHour),
     )
     .sort((a, b) => `${a.date}-${a.startHour}`.localeCompare(`${b.date}-${b.startHour}`))
     .slice(0, 4);

@@ -2324,6 +2324,32 @@ textarea:focus {
   gap: 18px;
 }
 
+.owner-workspace-error {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+  padding: 24px;
+  border: 1px solid #f0c8c4;
+  border-radius: 14px;
+  background: #fff8f7;
+}
+
+.owner-workspace-error h2,
+.owner-workspace-error p {
+  margin: 0;
+}
+
+.owner-workspace-error h2 {
+  color: #762e28;
+  font-size: 1.1rem;
+}
+
+.owner-workspace-error p {
+  color: #6d514e;
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
 .owner-navigation {
   position: relative;
   z-index: 1;
