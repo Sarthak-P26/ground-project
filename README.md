@@ -85,6 +85,13 @@ errors clearly and does not fabricate an AI response when Gemini is unavailable.
 Retrying the chat is owner-triggered; the Dashboard retries Gemini only when its
 refresh control is explicitly selected.
 
+The student-only floating assistant uses the same server-side Gemini configuration
+for general questions. Availability, booking rules, current prices, a student's own
+booking summary, and forecast facts are answered locally from validated server data;
+these answers remain available when Gemini quota or credentials are unavailable.
+Student questions never grant access to another student's booking details, and the
+assistant cannot make or change bookings.
+
 ### Weather data
 
 Set the turf city and state in Owner Settings to enable weather lookups. The backend

@@ -1194,6 +1194,12 @@ function App() {
           )}
         </div>
       </section>
+      <StudentAssistantChat context={{
+        date: activeDate,
+        sport: selectedSport,
+        section: selectedSlot?.section ?? null,
+        hour: selectedSlot?.hour ?? studentWeatherHour,
+      }} />
       </>}
 
       {selectedSlot && (
@@ -1792,6 +1798,190 @@ const ownerAssistantSuggestions = [
   'How much is collected and unpaid?',
   'How can I market quieter periods?',
 ];
+
+const studentAssistantSuggestions = [
+  'Which slots are available on my selected date?',
+  'What is the rain probability for my booking time?',
+  'How much will my booking cost?',
+  'What are the cancellation rules?',
+];
+
+function StudentAssistantChat({ context }) {
+  const [open, setOpen] = useState(false);
+  const [messages, setMessages] = useState([]);
+  const [draft, setDraft] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [lastFailedQuestion, setLastFailedQuestion] = useState('');
+  const requestRef = useRef(null);
+  const messagesRef = useRef(null);
+
+  useEffect(() => {
+    if (open && messagesRef.current) messagesRef.current.scrollTop = messagesRef.current.scrollHeight;
+  }, [open, messages, loading]);
+
+  useEffect(() => () => {
+    requestRef.current?.abort();
+    requestRef.current = null;
+  }, []);
+
+  async function sendQuestion(rawQuestion, addUserMessage = true) {
+    const question = String(rawQuestion || '').trim();
+    if (!question || loading || requestRef.current) return;
+    let historyMessages = messages;
+    if (!addUserMessage && messages.at(-1)?.role === 'user' && messages.at(-1)?.content === question) {
+      historyMessages = messages.slice(0, -1);
+    }
+    const priorMessages = historyMessages.slice(-12).map(({ role, content }) => ({ role, content }));
+    if (addUserMessage) {
+      setMessages((current) => [...current, {
+        id: `${Date.now()}-student-user`,
+        role: 'user',
+        content: question,
+      }]);
+    }
+    setDraft('');
+    setError('');
+    setLoading(true);
+    setLastFailedQuestion(question);
+    const controller = new AbortController();
+    requestRef.current = controller;
+    const timeout = window.setTimeout(() => controller.abort(), 20000);
+    try {
+      const response = await fetch('/api/ai/student-assistant', {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ question, history: priorMessages, context }),
+        signal: controller.signal,
+      });
+      const result = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(result?.message || 'The assistant could not answer. Please retry.');
+      if (typeof result?.answer !== 'string' || !result.answer.trim()) {
+        throw new Error('The assistant returned an incomplete answer. Please retry.');
+      }
+      if (requestRef.current === controller) {
+        setMessages((current) => [...current, {
+          id: `${Date.now()}-student-assistant`,
+          role: 'assistant',
+          content: result.answer.trim(),
+          source: result.source === 'gemini' ? 'gemini' : 'local',
+          keyFindings: Array.isArray(result.keyFindings) ? result.keyFindings.filter((item) => typeof item === 'string') : [],
+          suggestedActions: Array.isArray(result.suggestedActions) ? result.suggestedActions.filter((item) => typeof item === 'string') : [],
+        }]);
+        setLastFailedQuestion('');
+      }
+    } catch (requestError) {
+      if (requestRef.current === controller) {
+        setError(controller.signal.aborted
+          ? 'The assistant took too long to respond. Please retry.'
+          : requestError.message || 'The assistant is temporarily unavailable.');
+      }
+    } finally {
+      window.clearTimeout(timeout);
+      if (requestRef.current === controller) {
+        requestRef.current = null;
+        setLoading(false);
+      }
+    }
+  }
+
+  function submitDraft(event) {
+    event.preventDefault();
+    void sendQuestion(draft);
+  }
+
+  return (
+    <div className="owner-assistant student-assistant">
+      {open && (
+        <section className="owner-assistant-panel" role="dialog" aria-label="TurfCast Student Assistant">
+          <header className="owner-assistant-header">
+            <div className="owner-assistant-title">
+              <span className="owner-assistant-avatar"><Sparkles size={17} /></span>
+              <div><strong>TurfCast Student AI</strong><small>Helpful answers for your game day</small></div>
+            </div>
+            <button className="owner-assistant-close" type="button" onClick={() => setOpen(false)} aria-label="Minimize student assistant" title="Minimize">
+              <X size={18} />
+            </button>
+          </header>
+          <div className="owner-assistant-messages" ref={messagesRef} aria-live="polite" aria-relevant="additions text">
+            {messages.length === 0 && (
+              <div className="owner-assistant-welcome">
+                <strong>What can I help you with?</strong>
+                <p>I can check your selected date against current slots and booking rules.</p>
+                <div className="owner-assistant-suggestions">
+                  {studentAssistantSuggestions.map((question) => (
+                    <button key={question} type="button" onClick={() => void sendQuestion(question)} disabled={loading}>{question}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {messages.map((message) => (
+              <article className={`owner-assistant-message ${message.role}`} key={message.id}>
+                <span>{message.role === 'user' ? 'You' : 'TurfCast'}</span>
+                {message.role === 'assistant' && (
+                  <small className="student-assistant-source">
+                    {message.source === 'gemini' ? 'Gemini response' : 'Local answer · server-verified information'}
+                  </small>
+                )}
+                <p>{message.content}</p>
+                {message.keyFindings?.length > 0 && (
+                  <div className="owner-assistant-list">
+                    <strong>Key findings</strong>
+                    <ul>{message.keyFindings.map((item, index) => <li key={`${message.id}-finding-${index}`}>{item}</li>)}</ul>
+                  </div>
+                )}
+                {message.suggestedActions?.length > 0 && (
+                  <div className="owner-assistant-list">
+                    <strong>Suggested next steps</strong>
+                    <ul>{message.suggestedActions.map((item, index) => <li key={`${message.id}-action-${index}`}>{item}</li>)}</ul>
+                  </div>
+                )}
+              </article>
+            ))}
+            {loading && <p className="owner-assistant-typing" role="status"><span /> Checking that for you…</p>}
+          </div>
+          {error && (
+            <div className="owner-assistant-error" role="alert">
+              <span>{error}</span>
+              {lastFailedQuestion && <button type="button" onClick={() => void sendQuestion(lastFailedQuestion, false)} disabled={loading}>Retry</button>}
+            </div>
+          )}
+          <form className="owner-assistant-composer" onSubmit={submitDraft}>
+            <textarea
+              aria-label="Message TurfCast Student AI"
+              placeholder="Ask about slots, prices, or weather…"
+              value={draft}
+              maxLength={1500}
+              rows={2}
+              disabled={loading}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault();
+                  submitDraft(event);
+                }
+              }}
+            />
+            <button className="owner-assistant-send" type="submit" disabled={loading || !draft.trim()} aria-label="Send message">
+              <Send size={17} />
+            </button>
+          </form>
+        </section>
+      )}
+      <button
+        className="owner-assistant-toggle"
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        aria-expanded={open}
+        aria-label={open ? 'Close TurfCast Student Assistant' : 'Open TurfCast Student Assistant'}
+        title="Ask TurfCast"
+        data-tooltip="Ask TurfCast"
+      >
+        {open ? <X size={21} /> : <><MessageCircle size={21} /><Sparkles className="owner-assistant-toggle-sparkle" size={12} /></>}
+      </button>
+    </div>
+  );
+}
 
 function OwnerAssistantChat() {
   const [open, setOpen] = useState(false);

@@ -2684,6 +2684,14 @@ textarea:focus {
   font-weight: 800;
 }
 
+.student-assistant-source {
+  display: block;
+  margin: -2px 0 5px;
+  color: #587363;
+  font-size: 0.64rem;
+  font-weight: 700;
+}
+
 .owner-assistant-message.user > span {
   color: rgba(255, 255, 255, 0.76);
 }
