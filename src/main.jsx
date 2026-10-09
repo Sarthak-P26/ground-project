@@ -1729,11 +1729,10 @@ function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCanc
 }
 
 const ownerAssistantSuggestions = [
-  'Summarize how my turf is performing.',
-  'Which time slots have the lowest utilization?',
-  'How much revenue have I collected, and how much remains unpaid?',
-  'What should I focus on today?',
-  'Give me general advice on marketing my college turf.',
+  'How is my turf performing?',
+  'Which slots have the lowest utilization?',
+  'How much is collected and unpaid?',
+  'How can I market quieter periods?',
 ];
 
 function OwnerAssistantChat() {
@@ -1744,10 +1743,10 @@ function OwnerAssistantChat() {
   const [error, setError] = useState('');
   const [lastFailedQuestion, setLastFailedQuestion] = useState('');
   const requestRef = useRef(null);
-  const historyEndRef = useRef(null);
+  const messagesRef = useRef(null);
 
   useEffect(() => {
-    if (open) historyEndRef.current?.scrollIntoView({ block: 'end', behavior: 'smooth' });
+    if (open && messagesRef.current) messagesRef.current.scrollTop = messagesRef.current.scrollHeight;
   }, [open, messages, loading]);
 
   useEffect(() => () => {
@@ -1826,13 +1825,13 @@ function OwnerAssistantChat() {
           <header className="owner-assistant-header">
             <div className="owner-assistant-title">
               <span className="owner-assistant-avatar"><Sparkles size={17} /></span>
-              <div><strong>TurfCast AI Assistant</strong><small>Business insights and general advice</small></div>
+              <div><strong>TurfCast AI</strong><small>Your friendly turf companion</small></div>
             </div>
             <button className="owner-assistant-close" type="button" onClick={() => setOpen(false)} aria-label="Minimize assistant" title="Minimize">
               <X size={18} />
             </button>
           </header>
-          <div className="owner-assistant-messages" aria-live="polite" aria-relevant="additions text">
+          <div className="owner-assistant-messages" ref={messagesRef} aria-live="polite" aria-relevant="additions text">
             {messages.length === 0 && (
               <div className="owner-assistant-welcome">
                 <strong>What would you like to know?</strong>
@@ -1863,7 +1862,6 @@ function OwnerAssistantChat() {
               </article>
             ))}
             {loading && <p className="owner-assistant-typing" role="status"><span /> Thinking…</p>}
-            <div ref={historyEndRef} />
           </div>
           {error && (
             <div className="owner-assistant-error" role="alert">
@@ -1899,9 +1897,10 @@ function OwnerAssistantChat() {
         onClick={() => setOpen((current) => !current)}
         aria-expanded={open}
         aria-label={open ? 'Close TurfCast AI Assistant' : 'Open TurfCast AI Assistant'}
-        title="TurfCast AI Assistant"
+        title="Ask TurfCast AI"
+        data-tooltip="Ask TurfCast AI"
       >
-        {open ? <X size={21} /> : <MessageCircle size={22} />}
+        {open ? <X size={21} /> : <><MessageCircle size={21} /><Sparkles className="owner-assistant-toggle-sparkle" size={12} /></>}
       </button>
     </div>
   );
