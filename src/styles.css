@@ -3047,6 +3047,84 @@ textarea:focus {
   font-weight: 650;
 }
 
+.demo-data-banner {
+  padding: 11px 14px;
+  border: 1px solid #e9c98b;
+  border-radius: 10px;
+  background: #fff7e6;
+  color: #78531b;
+  font-size: 0.82rem;
+  font-weight: 800;
+  letter-spacing: 0.025em;
+}
+
+.owner-business-summary-secondary {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  padding: 13px 4px;
+}
+
+.owner-recent-activity {
+  padding: 18px;
+}
+
+.owner-recent-booking {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto auto;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 0;
+  border-top: 1px solid var(--owner-line);
+}
+
+.owner-recent-booking > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.owner-recent-booking > div strong,
+.owner-recent-booking > div span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.owner-recent-booking > div span {
+  color: var(--owner-muted);
+  font-size: 0.78rem;
+}
+
+.owner-booking-status-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 0 18px 13px;
+}
+
+.owner-booking-status-filters button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 11px;
+  border: 1px solid var(--owner-line);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--owner-muted);
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.owner-booking-status-filters button.active {
+  border-color: #1c5138;
+  background: #1c5138;
+  color: #fff;
+}
+
+.owner-booking-status-filters button span {
+  font-variant-numeric: tabular-nums;
+}
+
 .owner-page-content,
 .owner-analytics-page {
   display: grid;
@@ -3062,6 +3140,10 @@ textarea:focus {
   border: 1px solid var(--owner-line);
   border-radius: 14px;
   background: var(--owner-paper);
+}
+
+.owner-business-summary-secondary {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .owner-business-summary-item,
@@ -3254,6 +3336,14 @@ textarea:focus {
   border-top: 1px solid #edf1ee;
 }
 
+.owner-recent-booking {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.owner-recent-booking > .owner-status {
+  grid-column: 1 / -1;
+}
+
 .owner-attention-student {
   display: grid;
   gap: 4px;
@@ -3405,6 +3495,7 @@ textarea:focus {
   margin-top: 4px;
   color: var(--owner-muted);
   font-size: 0.72rem;
+  overflow-wrap: anywhere;
 }
 
 .owner-booking-actions {
@@ -4201,6 +4292,19 @@ textarea:focus {
   }
 
   .owner-business-summary-item:nth-child(n + 3) {
+    padding-top: 12px;
+    border-top: 1px solid var(--owner-line);
+  }
+
+  .owner-business-summary-secondary .owner-business-summary-item:nth-child(3) {
+    border-left: 1px solid var(--owner-line);
+  }
+
+  .owner-business-summary-secondary .owner-business-summary-item:nth-child(odd) {
+    border-left: 0;
+  }
+
+  .owner-business-summary-secondary .owner-business-summary-item:nth-child(n + 3) {
     padding-top: 12px;
     border-top: 1px solid var(--owner-line);
   }

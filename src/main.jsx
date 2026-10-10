@@ -37,9 +37,10 @@ import {
   Users,
   X,
 } from 'lucide-react';
-import { Bar, BarChart as RechartsBarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { Bar, BarChart as RechartsBarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import turfImage from './assets/four-section-turf.png';
 import { isValidMaintenanceDate, maintenanceDatesFromPeriods, maintenancePeriodsFromDates } from './maintenancePeriods.js';
+import { buildOwnerAnalytics } from './ownerAnalytics.js';
 import './styles.css';
 
 const STORAGE_KEYS = {
@@ -396,6 +397,7 @@ function App() {
   const [settings, setSettings] = useState(() => normalizeSettings(loadJson(STORAGE_KEYS.settings, DEFAULT_SETTINGS)));
   const [bookings, setBookings] = useState(() => normalizeBookings(loadJson(STORAGE_KEYS.bookings, [])));
   const [priceOverrides, setPriceOverrides] = useState([]);
+  const [demoMode, setDemoMode] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
   const [sessionLoading, setSessionLoading] = useState(() => Boolean(loadJson(STORAGE_KEYS.token, '')));
   const [authRole, setAuthRole] = useState('student');
@@ -428,7 +430,7 @@ function App() {
     date.setDate(date.getDate() + Number(settings.bookingWindowDays || DEFAULT_SETTINGS.bookingWindowDays));
     return toDateInput(date);
   }, [settings.bookingWindowDays]);
-  const activeBookings = bookings.filter((booking) => !booking.cancelledAt);
+  const activeBookings = bookings.filter((booking) => !booking.cancelledAt && booking.paymentStatus !== 'refunded');
   const studentWeatherHour = useMemo(() => {
     if (selectedSlot) return Number(selectedSlot.hour);
     const availableHour = isBlockedDate(settings, activeDate) ? undefined : slots.find((hour) =>
@@ -505,6 +507,7 @@ function App() {
       const searchableValues = isOwner
         ? [
             booking.playerName,
+            booking.customerEmail,
             booking.phone,
             booking.sport,
             booking.section,
@@ -601,6 +604,7 @@ function App() {
         setSettings(mergedSettings);
         setBookings(serverBookings);
         setPriceOverrides(Array.isArray(store.priceOverrides) ? store.priceOverrides : []);
+        setDemoMode(store.demoMode === true);
         saveJson(STORAGE_KEYS.settings, mergedSettings);
         saveJson(STORAGE_KEYS.bookings, serverBookings);
         setSyncStatus('Live');
@@ -849,6 +853,7 @@ function App() {
     setSettings(mergedSettings);
     setBookings(nextBookings);
     setPriceOverrides(nextPriceOverrides);
+    setDemoMode(store?.demoMode === true);
     saveJson(STORAGE_KEYS.user, user);
     saveJson(STORAGE_KEYS.token, sessionToken);
     saveJson(STORAGE_KEYS.settings, mergedSettings);
@@ -913,6 +918,7 @@ function App() {
     sessionStorage.removeItem('turf-admin');
     setCurrentUser(null);
     setBookings([]);
+    setDemoMode(false);
     setPendingCancellation(null);
     setAuthRole('student');
     setAuthMode('home');
@@ -1021,7 +1027,7 @@ function App() {
           }}
           user={currentUser}
           bookings={bookings}
-          activeBookings={activeBookings}
+          demoMode={demoMode}
           filteredBookings={filteredBookings}
           settings={settings}
           search={search}
@@ -1638,7 +1644,7 @@ function OwnerExperience({
   onPageChange,
   user,
   bookings,
-  activeBookings,
+  demoMode,
   filteredBookings,
   settings,
   search,
@@ -1684,10 +1690,17 @@ function OwnerExperience({
         <span>{new Intl.DateTimeFormat('en-IN', { weekday: 'long', day: 'numeric', month: 'short' }).format(new Date())}</span>
       </header>
 
+      {demoMode && (
+        <div className="demo-data-banner" role="status">
+          EXHIBITION DEMO — SIMULATED DATA · NO REAL TRANSACTIONS
+        </div>
+      )}
+
       {page === 'dashboard' && (
         <OwnerDashboard
           bookings={bookings}
           settings={settings}
+          demoMode={demoMode}
           onOpenBookings={() => onPageChange('bookings')}
           onMarkPaid={onMarkPaid}
           onCancelBooking={onCancelBooking}
@@ -1715,7 +1728,7 @@ function OwnerExperience({
         onSavePriceOverride={onSavePriceOverride}
         onDeactivatePriceOverride={onDeactivatePriceOverride}
       />}
-      {page === 'analytics' && <OwnerAnalytics bookings={activeBookings} settings={settings} />}
+      {page === 'analytics' && <OwnerAnalytics bookings={bookings} settings={settings} />}
       {page === 'settings' && <OwnerTurfSettings settings={settings} onEdit={onOpenSettings} />}
       {page === 'profile' && <OwnerProfile user={user} onEdit={onOpenProfile} />}
       <OwnerAssistantChat />
@@ -1771,7 +1784,7 @@ function buildLocalDashboardRecommendation(bookings, settings) {
   };
 }
 
-function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCancelBooking, onViewBooking }) {
+function OwnerDashboard({ bookings, settings, demoMode, onOpenBookings, onMarkPaid, onCancelBooking, onViewBooking }) {
   const [aiRecommendation, setAiRecommendation] = useState(() => ({
     ...buildLocalDashboardRecommendation(bookings, settings),
     source: 'local',
@@ -1783,6 +1796,8 @@ function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCanc
   const confirmedBookings = bookings.filter((booking) =>
     !booking.cancelledAt && booking.paymentStatus !== 'refunded',
   );
+  const paidBookings = confirmedBookings.filter((booking) => booking.paymentStatus === 'paid');
+  const unpaidBookings = confirmedBookings.filter((booking) => booking.paymentStatus === 'unpaid');
   const collectedRevenue = (items) => items
     .filter((booking) => booking.paymentStatus === 'paid' && !booking.cancelledAt)
     .reduce((sum, booking) => sum + Number(booking.price || 0), 0);
@@ -1804,8 +1819,21 @@ function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCanc
     )
     .sort((a, b) => `${a.date}-${a.startHour}`.localeCompare(`${b.date}-${b.startHour}`))
     .slice(0, 4);
+  const recentBookings = [...bookings]
+    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
+    .slice(0, 5);
+  const activityMetrics = [
+    { label: 'Total active bookings', value: confirmedBookings.length },
+    { label: 'Collected revenue', value: currency(collectedRevenue(paidBookings)) },
+    { label: 'Outstanding payments', value: currency(unpaidBookings.reduce((sum, booking) => sum + Number(booking.price || 0), 0)) },
+    { label: 'Cancelled / refunded', value: bookings.filter((booking) => Boolean(booking.cancelledAt)).length },
+  ];
 
   async function getAiRecommendation(forceGemini = false) {
+    if (demoMode) {
+      setAiFallbackReason('Exhibition demo uses local booking data only; external AI requests are disabled.');
+      return;
+    }
     if (aiRequestRef.current) return;
     const controller = new AbortController();
     let timedOut = false;
@@ -1851,17 +1879,30 @@ function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCanc
   }
 
   useEffect(() => {
-    void getAiRecommendation();
+    if (demoMode) {
+      setAiFallbackReason('Exhibition demo uses local booking data only; external AI requests are disabled.');
+    } else {
+      void getAiRecommendation();
+    }
     return () => {
       aiRequestRef.current?.abort();
       aiRequestRef.current = null;
     };
-  }, []);
+  }, [demoMode]);
 
   return (
     <div className="owner-page-content">
       <section className="owner-business-summary" aria-label="Today's business summary">
         {metrics.map((metric) => (
+          <article className="owner-business-summary-item" key={metric.label}>
+            <span>{metric.label}</span>
+            <strong>{metric.value}</strong>
+          </article>
+        ))}
+      </section>
+
+      <section className="owner-business-summary owner-business-summary-secondary" aria-label="Current booking and payment totals">
+        {activityMetrics.map((metric) => (
           <article className="owner-business-summary-item" key={metric.label}>
             <span>{metric.label}</span>
             <strong>{metric.value}</strong>
@@ -1881,7 +1922,7 @@ function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCanc
             className="owner-insight-refresh"
             type="button"
             onClick={() => void getAiRecommendation(true)}
-            disabled={aiLoading}
+            disabled={aiLoading || demoMode}
             aria-label="Refresh TurfCast Insight"
             title="Try Gemini again"
           >
@@ -1892,7 +1933,7 @@ function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCanc
         {aiFallbackReason && (
           <div className="owner-turfcast-insight-fallback" role="status">
             <span>{aiFallbackReason}</span>
-            <button type="button" onClick={() => void getAiRecommendation(true)} disabled={aiLoading}>Try Gemini again</button>
+            {!demoMode && <button type="button" onClick={() => void getAiRecommendation(true)} disabled={aiLoading}>Try Gemini again</button>}
           </div>
         )}
         {aiRecommendation && (
@@ -1902,7 +1943,7 @@ function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCanc
             <strong>Try this: {aiRecommendation.action}</strong>
           </article>
         )}
-        <p className="owner-turfcast-insight-note">AI suggestions are advisory. You stay in control.</p>
+        <p className="owner-turfcast-insight-note">{demoMode ? 'Demo insights are calculated locally from simulated booking records.' : 'AI suggestions are advisory. You stay in control.'}</p>
       </section>
       <OwnerAttentionBookings
         bookings={attentionBookings}
@@ -1911,6 +1952,24 @@ function OwnerDashboard({ bookings, settings, onOpenBookings, onMarkPaid, onCanc
         onMarkPaid={onMarkPaid}
         onCancelBooking={onCancelBooking}
       />
+      <section className="owner-panel owner-recent-activity">
+        <div className="owner-panel-heading">
+          <div><h3>Recent booking activity</h3><p>Latest records by creation time. Booking and payment status are shown separately.</p></div>
+          <button className="owner-inline-link" type="button" onClick={onOpenBookings}>View all bookings</button>
+        </div>
+        {recentBookings.length ? recentBookings.map((booking) => (
+          <article className="owner-recent-booking" key={booking.id}>
+            <div>
+              <strong>{booking.playerName}</strong>
+              <span>{booking.customerEmail || booking.email || 'Customer'} · {formatDate(booking.date)} · {formatHour(booking.startHour)} · {booking.sport} · {booking.section}</span>
+            </div>
+            <strong>{currency(booking.price)}</strong>
+            <span className={`owner-status ${booking.cancelledAt ? 'cancelled' : booking.paymentStatus === 'paid' ? 'active' : 'pending'}`}>
+              {booking.cancelledAt ? 'Cancelled · Refunded' : booking.paymentStatus === 'paid' ? 'Confirmed · Paid' : 'Confirmed · Pending'}
+            </span>
+          </article>
+        )) : <p className="owner-empty-note">No booking activity yet.</p>}
+      </section>
     </div>
   );
 }
@@ -2398,6 +2457,30 @@ function OwnerAttentionBookings({ bookings, onOpenBookings, onViewBooking, onMar
 }
 
 function OwnerBookings({ bookings, sports, search, sportFilter, onSearchChange, onSportFilterChange, onMarkPaid, onCancelBooking, onViewBooking }) {
+  const [statusFilter, setStatusFilter] = useState('Active');
+  const statusFilters = [
+    { id: 'All', label: 'All' },
+    { id: 'Active', label: 'Active', matches: (booking) => !booking.cancelledAt && booking.paymentStatus !== 'refunded' },
+    { id: 'Paid', label: 'Paid', matches: (booking) => !booking.cancelledAt && booking.paymentStatus === 'paid' },
+    { id: 'Pending', label: 'Pending', matches: (booking) => !booking.cancelledAt && booking.paymentStatus === 'unpaid' },
+    { id: 'Cancelled', label: 'Cancelled', matches: (booking) => Boolean(booking.cancelledAt) || booking.paymentStatus === 'refunded' },
+  ];
+  const selectedFilter = statusFilters.find((filter) => filter.id === statusFilter) || statusFilters[1];
+  const visibleBookings = [...bookings]
+    .filter((booking) => !selectedFilter.matches || selectedFilter.matches(booking))
+    .sort((a, b) => {
+      const aCancelled = Boolean(a.cancelledAt) || a.paymentStatus === 'refunded';
+      const bCancelled = Boolean(b.cancelledAt) || b.paymentStatus === 'refunded';
+      if (aCancelled !== bCancelled) return aCancelled ? 1 : -1;
+      const aUpcoming = a.date >= toDateInput(new Date());
+      const bUpcoming = b.date >= toDateInput(new Date());
+      if (aUpcoming !== bUpcoming) return aUpcoming ? -1 : 1;
+      if (a.date !== b.date) return aUpcoming ? a.date.localeCompare(b.date) : b.date.localeCompare(a.date);
+      return Number(a.startHour) - Number(b.startHour);
+    });
+  const countFor = (filter) => filter.matches
+    ? bookings.filter(filter.matches).length
+    : bookings.length;
   return (
     <section className="owner-panel owner-bookings-panel">
       <div className="owner-panel-heading owner-bookings-heading">
@@ -2410,13 +2493,26 @@ function OwnerBookings({ bookings, sports, search, sportFilter, onSearchChange, 
           </select>
         </div>
       </div>
+      <div className="owner-booking-status-filters" role="group" aria-label="Filter bookings by status">
+        {statusFilters.map((filter) => (
+          <button
+            key={filter.id}
+            type="button"
+            aria-pressed={statusFilter === filter.id}
+            className={statusFilter === filter.id ? 'active' : ''}
+            onClick={() => setStatusFilter(filter.id)}
+          >
+            {filter.label}<span>{countFor(filter)}</span>
+          </button>
+        ))}
+      </div>
       <div className="owner-booking-table" role="table" aria-label="Bookings">
         <div className="owner-booking-table-head" role="row">
           <span>Player</span><span>Date & time</span><span>Section</span><span>Sport</span><span>Players</span><span>Price</span><span>Payment</span><span>Status</span><span>Actions</span>
         </div>
-        {bookings.length ? bookings.map((booking) => (
+        {visibleBookings.length ? visibleBookings.map((booking) => (
           <article className="owner-booking-table-row" role="row" key={booking.id}>
-            <strong className="owner-player-cell">{booking.playerName}<small>{booking.id}</small></strong>
+            <strong className="owner-player-cell">{booking.playerName}<small>{booking.customerEmail || 'Email unavailable'}</small><small>{booking.id}</small></strong>
             <span>{formatDate(booking.date)}<small>{formatHour(booking.startHour)}–{formatHour(booking.endHour)}</small></span>
             <span>{booking.section}</span>
             <span>{booking.sport}</span>
@@ -2856,99 +2952,110 @@ function OwnerProfile({ user, onEdit }) {
 }
 
 function OwnerAnalytics({ bookings, settings }) {
-  const today = new Date(`${toDateInput(new Date())}T00:00:00`);
-  const todayValue = toDateInput(today);
-  const weekStart = new Date(today);
-  weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7));
-  const weekStartValue = toDateInput(weekStart);
-  const monthStartValue = `${todayValue.slice(0, 7)}-01`;
-  const confirmedBookings = bookings.filter((booking) =>
-    !booking.cancelledAt && booking.paymentStatus !== 'refunded',
-  );
-  const paidBookings = confirmedBookings.filter((booking) => booking.paymentStatus === 'paid');
-  const weeklyRevenue = paidBookings
-    .filter((booking) => booking.date >= weekStartValue && booking.date <= todayValue)
-    .reduce((sum, booking) => sum + Number(booking.price || 0), 0);
-  const monthlyRevenue = paidBookings
-    .filter((booking) => booking.date >= monthStartValue && booking.date <= todayValue)
-    .reduce((sum, booking) => sum + Number(booking.price || 0), 0);
-  const days = Array.from({ length: 7 }, (_, index) => {
-    const day = new Date(today);
-    day.setDate(day.getDate() - (6 - index));
-    const date = toDateInput(day);
-    const dayBookings = confirmedBookings.filter((booking) => booking.date === date);
-    return {
-      date,
-      label: new Intl.DateTimeFormat('en-IN', { weekday: 'short' }).format(day),
-      bookings: dayBookings.length,
-      revenue: dayBookings.filter((booking) => booking.paymentStatus === 'paid').reduce((sum, booking) => sum + Number(booking.price || 0), 0),
-    };
-  });
-  const sevenDayBookings = confirmedBookings.filter((booking) => booking.date >= days[0].date && booking.date <= todayValue);
-  const bySport = confirmedBookings.reduce((totals, booking) => {
-    totals[booking.sport] = (totals[booking.sport] || 0) + 1;
-    return totals;
-  }, {});
-  const sportData = Object.entries(bySport).map(([sport, count]) => ({ sport, count }));
-  const timeData = makeTimeSlots(settings).map((hour) => {
-    const count = sevenDayBookings.filter((booking) => Number(booking.startHour) === hour).length;
-    const capacity = settings.sections.length * 7;
-    return { hour, count, capacity, utilization: capacity ? Math.round((count / capacity) * 100) : 0 };
-  });
-  const busiest = timeData.reduce((best, period) => period.count > best.count ? period : best, { hour: null, count: 0 });
-  const leastUsed = timeData.reduce((least, period) => period.count < least.count ? period : least, { hour: null, count: Infinity });
+  const analytics = buildOwnerAnalytics(bookings, settings);
+  const { totals, dayRows, sportData, timeData, sectionData, busiest, leastUsed } = analytics;
   return (
     <div className="owner-analytics-page">
       <section className="owner-analytics-summary" aria-label="Revenue and booking totals">
-        <article><span>This week's collected revenue</span><strong>{currency(weeklyRevenue)}</strong></article>
-        <article><span>This month's collected revenue</span><strong>{currency(monthlyRevenue)}</strong></article>
-        <article><span>Confirmed bookings · all time</span><strong>{confirmedBookings.length}</strong></article>
+        <article title="All booking records, including cancellations and refunds.">
+          <span>Total bookings</span><strong>{totals.totalBookings}</strong><small>All stored records</small>
+        </article>
+        <article title="Not cancelled and not refunded.">
+          <span>Confirmed active</span><strong>{totals.activeBookings}</strong><small>{totals.paidBookings} paid · {totals.unpaidBookings} unpaid</small>
+        </article>
+        <article title="Current paid status, excluding cancelled and refunded records; grouped by booking date for trends.">
+          <span>Collected revenue</span><strong>{currency(totals.collectedRevenue)}</strong><small>Active paid bookings · all dates</small>
+        </article>
+        <article title="Current unpaid status among active bookings.">
+          <span>Pending payment</span><strong>{currency(totals.pendingAmount)}</strong><small>{totals.unpaidBookings} active unpaid bookings</small>
+        </article>
+        <article title="Cancellation rate is cancelled booking records divided by all booking records.">
+          <span>Cancelled</span><strong>{totals.cancelledBookings} · {totals.cancellationRate}%</strong><small>Of all booking records</small>
+        </article>
+        <article title="Records whose current payment status is refunded; these overlap with cancelled records when a cancellation caused the refund.">
+          <span>Refunded</span><strong>{totals.refundedBookings}</strong><small>Current payment status</small>
+        </article>
+        <article title="Active reservations in the last seven calendar days divided by configured slot capacity for those dates.">
+          <span>Last 7 days · occupancy</span><strong>{totals.lastSevenDayOccupancy}%</strong><small>By booking date</small>
+        </article>
       </section>
       <div className="owner-chart-grid">
         <section className="owner-panel owner-chart-panel">
-          <div className="owner-panel-heading"><div><h3>Bookings by day</h3><p>Scheduled over the last seven days.</p></div></div>
-          <ResponsiveContainer width="100%" height={220}>
-            <RechartsBarChart data={days} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+          <div className="owner-panel-heading"><div><h3>Booking trends · 30 days</h3><p>Records by scheduled booking date, including cancelled and refunded bookings.</p></div></div>
+          {!analytics.hasRecentBookings && <p className="owner-empty-note">No bookings were recorded in the last 30 days.</p>}
+          <ResponsiveContainer width="100%" height={250}>
+            <RechartsBarChart data={dayRows} margin={{ top: 8, right: 8, left: -20, bottom: 18 }}>
               <CartesianGrid strokeDasharray="3 3" vertical={false} />
-              <XAxis dataKey="label" />
+              <XAxis dataKey="label" interval={4} angle={-25} textAnchor="end" height={45} />
               <YAxis allowDecimals={false} />
-              <Tooltip />
-              <Bar dataKey="bookings" name="Bookings" fill="#18734b" radius={[5, 5, 0, 0]} />
+              <Tooltip labelFormatter={(_label, items) => items?.[0]?.payload?.date || ''} />
+              <Legend />
+              <Bar dataKey="activeBookings" name="Confirmed active" stackId="booking" fill="#18734b" />
+              <Bar dataKey="cancelledBookings" name="Cancelled" stackId="booking" fill="#d7835d" />
             </RechartsBarChart>
           </ResponsiveContainer>
         </section>
         <section className="owner-panel owner-chart-panel">
-          <div className="owner-panel-heading"><div><h3>Revenue by day</h3><p>Collected payments on scheduled bookings.</p></div></div>
-          <ResponsiveContainer width="100%" height={220}>
-            <LineChart data={days} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+          <div className="owner-panel-heading"><div><h3>Payment status · 30 days</h3><p>Current paid and unpaid amounts grouped by booking date; cancelled and refunded amounts excluded.</p></div></div>
+          {!analytics.hasRecentBookings && <p className="owner-empty-note">No booking revenue or pending amounts in this period.</p>}
+          <ResponsiveContainer width="100%" height={250}>
+            <LineChart data={dayRows} margin={{ top: 8, right: 8, left: 0, bottom: 18 }}>
               <CartesianGrid strokeDasharray="3 3" vertical={false} />
-              <XAxis dataKey="label" />
+              <XAxis dataKey="label" interval={4} angle={-25} textAnchor="end" height={45} />
               <YAxis tickFormatter={(value) => `₹${value}`} />
-              <Tooltip formatter={(value) => currency(value)} />
-              <Line type="monotone" dataKey="revenue" name="Collected" stroke="#18734b" strokeWidth={3} dot={{ r: 3 }} />
+              <Tooltip labelFormatter={(_label, items) => items?.[0]?.payload?.date || ''} formatter={(value) => currency(value)} />
+              <Legend />
+              <Line type="monotone" dataKey="collectedRevenue" name="Collected" stroke="#18734b" strokeWidth={3} dot={false} />
+              <Line type="monotone" dataKey="pendingRevenue" name="Pending" stroke="#d7835d" strokeWidth={2} dot={false} />
             </LineChart>
           </ResponsiveContainer>
         </section>
       </div>
-      <div className="owner-chart-grid owner-analysis-lists">
-        <section className="owner-panel">
-          <div className="owner-panel-heading"><div><h3>Bookings by sport</h3><p>Active reservations in stored records.</p></div></div>
-          {sportData.length ? sportData.map(({ sport, count }) => (
-            <div className="owner-bar-row" key={sport}><span>{sport}</span><div><i style={{ width: `${Math.max(8, (count / Math.max(...sportData.map((item) => item.count))) * 100)}%` }} /></div><strong>{count}</strong></div>
-          )) : <p className="owner-empty-note">No booking data yet.</p>}
+      <div className="owner-chart-grid">
+        <section className="owner-panel owner-chart-panel">
+          <div className="owner-panel-heading"><div><h3>Cancellations · 30 days</h3><p>Counted by cancellation timestamp, not the original booking date.</p></div></div>
+          {!analytics.hasRecentCancellations ? <p className="owner-empty-note">No cancellations were recorded in the last 30 days.</p> : (
+            <ResponsiveContainer width="100%" height={220}>
+              <RechartsBarChart data={dayRows} margin={{ top: 8, right: 8, left: -20, bottom: 18 }}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="label" interval={4} angle={-25} textAnchor="end" height={45} />
+                <YAxis allowDecimals={false} />
+                <Tooltip labelFormatter={(_label, items) => items?.[0]?.payload?.date || ''} />
+                <Bar dataKey="cancellations" name="Cancellations" fill="#d7835d" radius={[5, 5, 0, 0]} />
+              </RechartsBarChart>
+            </ResponsiveContainer>
+          )}
         </section>
         <section className="owner-panel">
-          <div className="owner-panel-heading"><div><h3>Utilization by time</h3><p>Reserved sections against available sections.</p></div></div>
+          <div className="owner-panel-heading"><div><h3>Bookings by sport</h3><p>Confirmed active reservations across all stored dates.</p></div></div>
+          {sportData.length ? sportData.map(({ sport, count }) => (
+            <div className="owner-bar-row" key={sport}><span>{sport}</span><div><i style={{ width: `${Math.max(8, (count / Math.max(...sportData.map((item) => item.count))) * 100)}%` }} /></div><strong>{count}</strong></div>
+          )) : <p className="owner-empty-note">No active booking data yet.</p>}
+        </section>
+      </div>
+      <div className="owner-chart-grid owner-analysis-lists">
+        <section className="owner-panel">
+          <div className="owner-panel-heading"><div><h3>Section utilization · last 7 days</h3><p>Active reservations by section; denominator is configured time slots × seven dates.</p></div></div>
+          <div className="owner-utilization-list">
+            {sectionData.map(({ section, count, capacity, utilization }) => (
+              <div className="owner-utilization-row" key={section}>
+                <span>{section}<small>{count}/{capacity} reservations</small></span><div><i style={{ width: `${utilization}%` }} /></div><strong>{utilization}%</strong>
+              </div>
+            ))}
+          </div>
+        </section>
+        <section className="owner-panel">
+          <div className="owner-panel-heading"><div><h3>Slot utilization · last 7 days</h3><p>Active reservations by start time over seven days; denominator is sections × seven dates.</p></div></div>
           <div className="owner-utilization-list">
             {timeData.map(({ hour, count, capacity, utilization }) => (
               <div className="owner-utilization-row" key={hour}>
-                <span>{formatHour(hour)}</span><div><i style={{ width: `${utilization}%` }} /></div><strong>{utilization}%</strong>
+                <span>{formatHour(hour)}<small>{count}/{capacity} reservations</small></span><div><i style={{ width: `${utilization}%` }} /></div><strong>{utilization}%</strong>
               </div>
             ))}
           </div>
           <div className="owner-time-summary">
             <span>Busiest <strong>{busiest.count ? formatHour(busiest.hour) : 'No bookings'}</strong></span>
-            <span>Least used <strong>{!sevenDayBookings.length ? 'No booking data' : leastUsed.hour === null ? 'No slots' : formatHour(leastUsed.hour)}</strong></span>
+            <span>Least used <strong>{!analytics.hasRecentBookings ? 'No booking data' : leastUsed.hour === null ? 'No slots' : formatHour(leastUsed.hour)}</strong></span>
           </div>
         </section>
       </div>

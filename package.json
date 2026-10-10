@@ -11,7 +11,11 @@
     "test": "node --test",
     "preview": "vite preview --host 0.0.0.0",
     "migrate:firebase": "node scripts/migrateToFirebase.js",
-    "seed:history": "node scripts/seedHistoricalBookings.js"
+    "seed:history": "node scripts/seedHistoricalBookings.js",
+    "seed:demo": "node scripts/demoData.js seed",
+    "verify:demo": "node scripts/demoData.js verify",
+    "reset:demo": "node scripts/demoData.js reset",
+    "start:demo": "node scripts/startDemoServer.js"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.4",

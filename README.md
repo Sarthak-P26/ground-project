@@ -44,6 +44,40 @@ the college turf; owners can manage bookings, pricing, turf settings, and busine
 analytics. Existing accounts without a stored role continue to be treated as students.
 Sign in again after upgrading so the server can establish a role-checked session.
 
+### Isolated exhibition demo
+
+For a showcase using fictional data, use the dedicated demo launcher. Demo mode takes
+precedence over Firebase configuration and uses only `data/demo-store.json`; it does
+not read or write `data/store.json` or Firebase. The launcher uses port 4174 and does
+not seed automatically.
+
+In PowerShell, from the project directory:
+
+```powershell
+npm run seed:demo
+npm run verify:demo
+npm run start:demo
+```
+
+Use `http://localhost:4174` for the isolated exhibition app. Demo sign-in credentials:
+
+- Owner: `sarthakpawar2604@gmail.com` (isolated demo account only)
+- Students: `student01@example.test` through `student08@example.test`
+- Shared password for all demo accounts: `TurfDemo#2026`
+
+The owner workspace displays **EXHIBITION DEMO — SIMULATED DATA**, and booking and new
+account records are marked as demo data internally. The seed creates exactly 25
+bookings: 20 active (15 paid and 5 pending) and 5 cancelled/refunded at ₹600 each.
+Expected initial totals are ₹9,000 in paid booking value, ₹3,000 pending, and a 20%
+cancellation rate. Do not use these credentials with real services. If the server is running
+with `NODE_ENV=production`, demo mode is blocked unless
+`TURFCAST_DEMO_ALLOW_PRODUCTION=true` is explicitly set in the launch environment.
+Stop the demo server with `Ctrl+C` to leave demo mode. The normal app remains available
+on port 4173. Existing normal store and Firebase data remain untouched. To recreate the
+fictional dataset, run `npm run seed:demo`; to remove only
+the dedicated demo store, stop the server and run `npm run reset:demo`. The reset
+command never targets `data/store.json` or Firebase.
+
 ### Configure Firebase Realtime Database
 
 Copy `.env.example` to `.env` and provide a Firebase service account's project ID,

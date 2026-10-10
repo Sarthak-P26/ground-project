@@ -30,6 +30,10 @@ console.info(`[Gemini] configured=${Boolean(process.env.GEMINI_API_KEY)} model=$
 const app = express(); const PORT = process.env.PORT || 4173;
 const DEFAULT_TURF_LOCATION = 'Dharashiv, Maharashtra';
 const defaults = { settings: { price: 600, durationHours: 3, openHour: 6, closeHour: 21, sections: ['Section A', 'Section B', 'Section C', 'Section D'], sports: ['Cricket', 'Football'], bookingWindowDays: 14, maxActiveBookingsPerPhone: 2, maintenanceDates: [], turfLocation: DEFAULT_TURF_LOCATION }, priceOverrides: [], bookings: [], users: [] };
+const demoMode = process.env.TURFCAST_DEMO_MODE === 'true';
+if (demoMode && process.env.NODE_ENV === 'production' && process.env.TURFCAST_DEMO_ALLOW_PRODUCTION !== 'true') {
+  throw new Error('TURFCAST_DEMO_MODE is blocked in production unless TURFCAST_DEMO_ALLOW_PRODUCTION=true is explicitly set.');
+}
 const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');
 const databaseUrl = process.env.FIREBASE_DATABASE_URL;
 const hasServiceAccount = Boolean(databaseUrl && process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && privateKey);
@@ -39,7 +43,8 @@ function publicRtdbRef(path = '') {
   return { once: async () => { const value = await request('GET'); return { val: () => value }; }, set: (value) => request('PUT', value), update: (value) => request('PATCH', value), remove: () => request('DELETE') };
 }
 let db;
-if (hasServiceAccount) { admin.initializeApp({ credential: admin.credential.cert({ projectId: process.env.FIREBASE_PROJECT_ID, clientEmail: process.env.FIREBASE_CLIENT_EMAIL, privateKey }), databaseURL: databaseUrl }); db = admin.database(); }
+if (demoMode) console.warn('TURFCAST DEMO MODE enabled; Firebase is disabled and data/demo-store.json is isolated.');
+else if (hasServiceAccount) { admin.initializeApp({ credential: admin.credential.cert({ projectId: process.env.FIREBASE_PROJECT_ID, clientEmail: process.env.FIREBASE_CLIENT_EMAIL, privateKey }), databaseURL: databaseUrl }); db = admin.database(); }
 else if (databaseUrl && process.env.FIREBASE_ALLOW_PUBLIC_REST === 'true') { db = { ref: publicRtdbRef }; console.warn('Using public RTDB REST demo mode. Add service-account credentials before production.'); }
 else console.warn('Firebase credentials are missing; using data/store.json for app data.');
 const smtpUser = process.env.SMTP_USER;
@@ -146,7 +151,7 @@ const normalizeStore = (store = {}, forceRoleMigration = false) => {
   });
   return normalized;
 };
-const storePath = path.join(__dirname, 'data', 'store.json');
+const storePath = path.join(__dirname, 'data', demoMode ? 'demo-store.json' : 'store.json');
 async function readFileStore() {
   try {
     return normalizeStore(JSON.parse(await fs.readFile(storePath, 'utf8')));
@@ -157,7 +162,7 @@ async function readFileStore() {
 }
 async function readStore() {
   const fileStore = await readFileStore();
-  if (!db) return fileStore;
+  if (demoMode || !db) return fileStore;
   const [settings, priceOverrides, bookings, users] = await Promise.all(['settings', 'priceOverrides', 'bookings', 'users'].map((node) => db.ref(node).once('value')));
   const mergedUsers = new Map(fileStore.users.map((user) => [user.id, user]));
   const firebaseUsers = list(users.val() || []);
@@ -603,11 +608,11 @@ async function writeFileStore(store) {
   await fs.rename(temporaryPath, storePath);
 }
 async function writeStore(store) {
-  if (!db) return writeFileStore(store);
+  if (demoMode || !db) return writeFileStore(store);
   await db.ref().update({ settings: store.settings, priceOverrides: store.priceOverrides, bookings: store.bookings, users: store.users });
 }
 async function writeUsers(users) {
-  if (db) return db.ref('users').set(users);
+  if (db && !demoMode) return db.ref('users').set(users);
   const store = await readFileStore();
   store.users = users;
   await writeFileStore(store);
@@ -622,7 +627,7 @@ function withStoreLock(operation) {
   return result;
 }
 async function readHistoricalBookings() {
-  if (!db) return [];
+  if (demoMode || !db) return [];
   return list((await db.ref('historicalBookings').once('value')).val());
 }
 const slots = (s) => { const out = []; for (let h = s.openHour; h + s.durationHours <= s.closeHour; h += s.durationHours) out.push(h); return out; };
@@ -657,7 +662,10 @@ const normalizeIdentifier = (value = '') => {
 const publicStoreForUser = (store, user) => ({
   ...publicStore(store),
   bookings: user?.role === 'owner'
-    ? publicStore(store).bookings
+    ? publicStore(store).bookings.map((booking) => ({
+        ...booking,
+        customerEmail: store.users.find((account) => account.id === booking.bookedBy)?.email || '',
+      }))
     : publicStore(store).bookings.map((booking) => {
         const ownBooking = user && booking.bookedBy === user.id;
         if (ownBooking) return booking;
@@ -688,6 +696,7 @@ const publicStore = (s) => ({
   settings: s.settings,
   bookings: (s.bookings || []).map(normalizeBooking),
   priceOverrides: s.priceOverrides || [],
+  demoMode,
 });
 function configuredAppUrl() {
   const configuredUrl = String(process.env.APP_BASE_URL || '').trim();
@@ -1937,6 +1946,7 @@ app.post('/api/auth/signup', route(async (req, res) => {
       passwordHash: hash(password),
       sessionTokenHash: sessionHash(sessionToken),
       createdAt: new Date().toISOString(),
+      ...(demoMode ? { demoRecord: true } : {}),
     };
     store.users.push(user);
     await writeUsers(store.users);
@@ -2295,6 +2305,7 @@ app.post('/api/bookings', route(async (req, res) => {
       teamSize,
       notes: String(req.body.notes || '').trim(),
       createdAt: new Date().toISOString(),
+      ...(demoMode ? { demoRecord: true } : {}),
     };
     if (!booking.date || !booking.section || !booking.sport || !booking.playerName || !booking.phone) {
       return { status: 400, body: { message: 'Missing booking details.' } };
@@ -2372,5 +2383,5 @@ app.delete('/api/bookings/:id', route(async (req, res) => {
   });
   res.status(result.status).json(result.body);
 }));
-app.use((err, _req, res, _next) => { console.error(err); res.status(500).json({ message: 'Could not read or save app data. Check data/store.json permissions and server logs.' }); });
+app.use((err, _req, res, _next) => { console.error(err); res.status(500).json({ message: `Could not read or save app data. Check ${demoMode ? 'data/demo-store.json' : 'data/store.json'} permissions and server logs.` }); });
 app.use(express.static(path.join(__dirname, 'dist'))); app.get('*', (_req, res) => res.sendFile(path.join(__dirname, 'dist', 'index.html'))); app.listen(PORT, () => console.log(`Turf booking app running at http://localhost:${PORT}`));
