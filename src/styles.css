@@ -648,18 +648,38 @@ a:focus-visible {
 }
 
 .product-tabs {
-  position: sticky;
-  top: var(--sticky-navigation-top, 86px);
-  z-index: 7;
+  position: fixed;
+  top: var(--fixed-navigation-top, 86px);
+  left: var(--fixed-navigation-left, 24px);
+  z-index: 9;
   display: inline-flex;
   gap: 6px;
-  margin: 0 0 18px;
+  overflow-x: auto;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+  width: max-content;
+  max-width: var(--fixed-navigation-width, calc(100vw - 48px));
+  margin: 0;
   border: 1px solid rgba(218, 220, 224, 0.82);
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.84);
   padding: 6px;
   box-shadow: var(--shadow-sm);
   backdrop-filter: blur(16px);
+}
+
+.fixed-navigation-placeholder {
+  height: var(--fixed-navigation-height, 54px);
+  min-width: 0;
+}
+
+.student-navigation-placeholder {
+  margin-bottom: 18px;
+}
+
+.student-experience #schedule,
+.student-experience #records {
+  scroll-margin-top: calc(var(--fixed-navigation-top, 86px) + var(--fixed-navigation-height, 54px) + 18px);
 }
 
 .product-tabs button {
@@ -673,6 +693,7 @@ a:focus-visible {
   color: var(--muted);
   padding: 0 14px;
   font-weight: 800;
+  flex: 0 0 auto;
 }
 
 .product-tabs button:hover {
@@ -1680,66 +1701,6 @@ textarea:focus {
   color: #0f7b57;
 }
 
-.receipt-print-ticket {
-  width: min(680px, calc(100% - 40px));
-  margin: 40px auto;
-  border: 1px solid #dce4dd;
-  border-radius: 8px;
-  padding: 28px;
-  color: #1d241f;
-  font-family: inherit;
-}
-
-.receipt-print-brand,
-.receipt-print-id {
-  margin: 0;
-  color: #526259;
-  font-weight: 800;
-}
-
-.receipt-print-ticket h1 {
-  margin: 10px 0 4px;
-  font-size: 1.6rem;
-}
-
-.receipt-print-ticket dl {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0;
-  margin: 24px 0 0;
-  border-top: 1px solid #dce4dd;
-}
-
-.receipt-print-ticket dl > div {
-  padding: 14px 8px 14px 0;
-  border-bottom: 1px solid #dce4dd;
-}
-
-.receipt-print-ticket dt {
-  color: #607066;
-  font-size: 0.78rem;
-  font-weight: 900;
-  text-transform: uppercase;
-}
-
-.receipt-print-ticket dd {
-  margin: 4px 0 0;
-  font-weight: 800;
-  overflow-wrap: anywhere;
-}
-
-.receipt-print-total {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding-top: 18px;
-  font-weight: 900;
-}
-
-#receipt-print-root {
-  display: none;
-}
-
 .modal-header {
   justify-content: space-between;
   gap: 14px;
@@ -1920,6 +1881,11 @@ textarea:focus {
   .product-tabs {
     width: 100%;
     overflow-x: auto;
+    left: var(--fixed-navigation-left, 14px);
+    width: var(--fixed-navigation-width, calc(100vw - 28px));
+    max-width: var(--fixed-navigation-width, calc(100vw - 28px));
+    flex-wrap: nowrap;
+    white-space: nowrap;
   }
 
   .auth-nav,
@@ -2028,36 +1994,6 @@ textarea:focus {
 
   .settings-modal {
     padding: 16px;
-  }
-}
-
-@media print {
-  body {
-    background: #fff !important;
-  }
-
-  body > *:not(#receipt-print-root) {
-    display: none !important;
-  }
-
-  #receipt-print-root {
-    position: absolute;
-    inset: 0;
-    display: block !important;
-    background: #fff;
-  }
-
-  #receipt-print-root,
-  #receipt-print-root * {
-    visibility: visible !important;
-  }
-
-  .receipt-print-ticket {
-    width: 100%;
-    margin: 0;
-    border: 0;
-    border-radius: 0;
-    padding: 0;
   }
 }
 
@@ -3038,14 +2974,15 @@ textarea:focus {
 }
 
 .owner-navigation {
-  position: sticky;
-  top: var(--sticky-navigation-top, 86px);
-  z-index: 7;
+  position: fixed;
+  top: var(--fixed-navigation-top, 86px);
+  left: var(--fixed-navigation-left, 24px);
+  z-index: 9;
   display: flex;
   gap: 5px;
   overflow-x: auto;
-  width: fit-content;
-  max-width: 100%;
+  width: max-content;
+  max-width: var(--fixed-navigation-width, calc(100vw - 48px));
   padding: 6px;
   border: 1px solid var(--owner-line);
   border-radius: 14px;
@@ -3066,6 +3003,7 @@ textarea:focus {
   background: transparent;
   font-size: 0.87rem;
   font-weight: 750;
+  flex: 0 0 auto;
   white-space: nowrap;
 }
 
@@ -4224,10 +4162,6 @@ textarea:focus {
 }
 
 @media (max-width: 680px) {
-  .owner-navigation {
-    z-index: 7;
-  }
-
   .owner-assistant-toggle {
     right: max(16px, env(safe-area-inset-right));
     bottom: max(16px, env(safe-area-inset-bottom));
@@ -4287,8 +4221,12 @@ textarea:focus {
   }
 
   .owner-navigation {
-    width: 100%;
+    left: var(--fixed-navigation-left, 14px);
+    width: var(--fixed-navigation-width, calc(100vw - 28px));
+    max-width: var(--fixed-navigation-width, calc(100vw - 28px));
     border-radius: 12px;
+    flex-wrap: nowrap;
+    white-space: nowrap;
   }
 
   .owner-navigation button {

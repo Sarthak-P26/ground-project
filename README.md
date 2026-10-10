@@ -60,11 +60,11 @@ after configuring the credentials. Public REST demo mode is available only when
 ### Configure password recovery
 
 In local MVP mode, the password recovery form can reset an account directly by its
-registered email or phone number. This is intended only for a disposable local demo:
-it does not verify account ownership. Direct reset is disabled by default. To opt in,
-set `TURFCAST_MVP_DIRECT_PASSWORD_RESET=true` in the local `.env` and restart the
-server. The server rejects this mode whenever `NODE_ENV=production`; do not enable it
-for shared or deployed environments. Use demo credentials only.
+registered email or phone number entered on the login screen. This is intended only
+for a disposable local demo and does not verify account ownership. It works without
+an environment flag when the server is not running with `NODE_ENV=production`; the
+server rejects direct resets in production. Do not use this recovery flow for shared
+or deployed accounts. Use demo credentials only.
 
 For verified email recovery, configure Gmail SMTP. In `.env`, set `SMTP_USER` to the
 Gmail address that will send messages and `SMTP_APP_PASSWORD` to a Google App Password

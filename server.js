@@ -2065,10 +2065,10 @@ app.post('/api/auth/reset-password', route(async (req, res) => {
   const token = String(req.body.token || '');
   const password = String(req.body.password || '');
   if (password.length < 6) return res.status(400).json({ message: 'Password must be at least 6 characters.' });
-  if (String(req.body.confirmPassword || '') !== password) {
-    return res.status(400).json({ message: 'The new password and confirmation do not match.' });
-  }
   if (token) {
+    if (String(req.body.confirmPassword || '') !== password) {
+      return res.status(400).json({ message: 'The new password and confirmation do not match.' });
+    }
     const result = await withStoreLock(async () => {
       const store = await readStore();
       const user = store.users.find((record) => record.passwordReset?.token === token);
@@ -2086,16 +2086,15 @@ app.post('/api/auth/reset-password', route(async (req, res) => {
   if (process.env.NODE_ENV === 'production') {
     return res.status(403).json({ message: 'Direct password reset is disabled in production. Use a verified reset link.' });
   }
-  if (process.env.TURFCAST_MVP_DIRECT_PASSWORD_RESET !== 'true') {
-    return res.status(403).json({ message: 'Direct password reset is disabled. Enable TURFCAST_MVP_DIRECT_PASSWORD_RESET=true only for a local demo.' });
-  }
   if (req.body.directReset !== true) {
     return res.status(400).json({ message: 'A direct demo reset request is required.' });
   }
 
   const rawIdentifier = String(req.body.identifier || '').trim();
   let normalizedIdentifier;
-  if (rawIdentifier.includes('@')) {
+  if (!rawIdentifier) {
+    return res.status(400).json({ message: 'Enter your registered email or phone in the login field before resetting your password.' });
+  } else if (rawIdentifier.includes('@')) {
     const email = normalizeEmail(rawIdentifier);
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return res.status(400).json({ message: 'Enter a valid registered email address or phone number.' });
@@ -2115,7 +2114,7 @@ app.post('/api/auth/reset-password', route(async (req, res) => {
 
   const result = await withStoreLock(async () => {
     const store = await readStore();
-    const users = store.users.filter((user) => rawIdentifier.includes('@')
+    const users = store.users.filter((user) => normalizedIdentifier.includes('@')
       ? normalizeEmail(user.email) === normalizedIdentifier
       : normalizePhone(user.phone) === normalizedIdentifier);
     if (!users.length) return { status: 404, message: 'No account was found with that registered email or phone number.' };

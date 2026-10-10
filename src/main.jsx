@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { createPortal } from 'react-dom';
 import {
   Activity,
   ArrowRight,
@@ -402,6 +401,7 @@ function App() {
   const [currentUser, setCurrentUser] = useState(null);
   const [sessionLoading, setSessionLoading] = useState(() => Boolean(loadJson(STORAGE_KEYS.token, '')));
   const [authRole, setAuthRole] = useState('student');
+  const [authIdentifier, setAuthIdentifier] = useState('');
   const [authMode, setAuthMode] = useState(() => new URLSearchParams(window.location.search).get('reset') ? 'reset' : 'home');
   const [authError, setAuthError] = useState('');
   const [authNotice, setAuthNotice] = useState('');
@@ -456,19 +456,42 @@ function App() {
   useEffect(() => {
     const shell = document.querySelector('.app-shell');
     const header = shell?.querySelector('.topbar');
-    if (!shell || !header) return undefined;
+    const navigation = shell?.querySelector(isOwner ? '.owner-navigation' : '.product-tabs');
+    const placeholder = shell?.querySelector('.fixed-navigation-placeholder');
+    if (!shell || !header || !navigation || !placeholder) return undefined;
 
     const updateNavigationOffset = () => {
+      const shellRect = shell.getBoundingClientRect();
+      const headerRect = header.getBoundingClientRect();
+      const shellStyle = getComputedStyle(shell);
+      const contentLeft = Number.parseFloat(shellStyle.paddingLeft) || 0;
+      const contentRight = Number.parseFloat(shellStyle.paddingRight) || 0;
       shell.style.setProperty(
-        '--sticky-navigation-top',
-        `${Math.ceil(header.getBoundingClientRect().height + 24)}px`,
+        '--fixed-navigation-top',
+        `${Math.ceil(headerRect.bottom + 8)}px`,
       );
+      shell.style.setProperty('--fixed-navigation-left', `${Math.ceil(shellRect.left + contentLeft)}px`);
+      shell.style.setProperty('--fixed-navigation-width', `${Math.max(0, Math.floor(shell.clientWidth - contentLeft - contentRight))}px`);
+      shell.style.setProperty('--fixed-navigation-height', `${navigation.offsetHeight}px`);
+      placeholder.style.height = `${navigation.offsetHeight}px`;
     };
     updateNavigationOffset();
     const observer = new ResizeObserver(updateNavigationOffset);
     observer.observe(header);
-    return () => observer.disconnect();
-  }, [currentUser?.id, isOwner]);
+    observer.observe(shell);
+    observer.observe(navigation);
+    window.addEventListener('resize', updateNavigationOffset);
+    window.addEventListener('scroll', updateNavigationOffset, { passive: true });
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', updateNavigationOffset);
+      window.removeEventListener('scroll', updateNavigationOffset);
+      shell.style.removeProperty('--fixed-navigation-top');
+      shell.style.removeProperty('--fixed-navigation-left');
+      shell.style.removeProperty('--fixed-navigation-width');
+      shell.style.removeProperty('--fixed-navigation-height');
+    };
+  }, [currentUser?.id, isOwner, ownerPage]);
 
   const myBookings = currentUser
     ? bookings
@@ -943,6 +966,21 @@ function App() {
         settings={settings}
         bookings={bookings}
         authRole={authRole}
+        authIdentifier={authIdentifier}
+        onAuthIdentifierChange={(identifier) => {
+          setAuthIdentifier(identifier);
+          if (identifier.trim()) setAuthError('');
+        }}
+        onForgotPassword={() => {
+          if (!authIdentifier.trim()) {
+            setAuthError('Enter your registered email or phone in the login field first.');
+            setAuthNotice('');
+            return;
+          }
+          setAuthMode('forgot');
+          setAuthError('');
+          setAuthNotice('');
+        }}
         onRoleChange={setAuthRole}
         onModeChange={(mode) => {
           setAuthMode(mode);
@@ -984,10 +1022,10 @@ function App() {
 
       {appMessage && <p className="form-error" role="alert">{appMessage}</p>}
 
-      {!isOwner && <nav className="product-tabs" aria-label="Main navigation">
+      {!isOwner && <div className="fixed-navigation-placeholder student-navigation-placeholder" aria-hidden="true"><nav className="product-tabs" aria-label="Main navigation">
           <button type="button" onClick={() => scrollToSection('schedule')}><CalendarDays size={17} /><span>Browse & Book</span></button>
           <button type="button" onClick={() => scrollToSection('records')}><ClipboardCheck size={17} /><span>My Bookings</span></button>
-      </nav>}
+      </nav></div>}
 
       {isOwner ? (
         <OwnerWorkspaceErrorBoundary>
@@ -1313,7 +1351,7 @@ function App() {
   );
 }
 
-function AuthExperience({ authMode, authError, authNotice, authLoading, settings, bookings, authRole, onRoleChange, onModeChange, onSubmit }) {
+function AuthExperience({ authMode, authError, authNotice, authLoading, settings, bookings, authRole, authIdentifier, onAuthIdentifierChange, onForgotPassword, onRoleChange, onModeChange, onSubmit }) {
   const today = toDateInput(new Date());
   const todayBookings = bookings.filter((booking) => booking.date === today).length;
   const slots = makeTimeSlots(settings).length * settings.sections.length;
@@ -1395,6 +1433,9 @@ function AuthExperience({ authMode, authError, authNotice, authLoading, settings
           authNotice={authNotice}
           authLoading={authLoading}
           role={authRole}
+          identifier={authIdentifier}
+          onIdentifierChange={onAuthIdentifierChange}
+          onForgotPassword={onForgotPassword}
           onRoleChange={onRoleChange}
           onModeChange={onModeChange}
           onSubmit={onSubmit}
@@ -1469,28 +1510,19 @@ function AuthStat({ label, value }) {
   );
 }
 
-function AuthPanel({ mode, authError, authNotice, authLoading, role, onRoleChange, onModeChange, onSubmit }) {
+function AuthPanel({ mode, authError, authNotice, authLoading, role, identifier, onIdentifierChange, onForgotPassword, onRoleChange, onModeChange, onSubmit }) {
   const isSignup = mode === 'signup';
-  const isDirectReset = mode === 'forgot' && import.meta.env.DEV;
-  const isEmailResetRequest = mode === 'forgot' && !import.meta.env.DEV;
+  const isDirectReset = mode === 'forgot';
   const isTokenReset = mode === 'reset';
-  const isPasswordRecovery = isDirectReset || isTokenReset;
-  const isRecoveryMode = isPasswordRecovery || isEmailResetRequest;
-  const [localError, setLocalError] = useState('');
-  const panelTitle = isEmailResetRequest ? 'Request a password reset link' : isDirectReset ? 'Reset your TurfCast password' : isTokenReset ? 'Choose a new password' : isSignup ? 'Create your TurfCast account' : 'Login to book your slot';
+  const isRecoveryMode = isDirectReset || isTokenReset;
+  const panelTitle = isDirectReset ? 'Reset your TurfCast password' : isTokenReset ? 'Choose a new password' : isSignup ? 'Create your TurfCast account' : 'Login to book your slot';
   const panelKicker = isRecoveryMode ? 'Account Recovery' : isSignup ? 'New Player' : 'Welcome Back';
 
   async function handleSubmit(event) {
     event.preventDefault();
-    setLocalError('');
     const formData = new FormData(event.currentTarget);
     const payload = Object.fromEntries(formData.entries());
-    if (isPasswordRecovery && payload.password !== payload.confirmPassword) {
-      setLocalError('The new password and confirmation do not match.');
-      return;
-    }
-    if (isDirectReset) await onSubmit('reset-password', { ...payload, directReset: true });
-    else if (isEmailResetRequest) await onSubmit('forgot-password', { identifier: payload.identifier });
+    if (isDirectReset) await onSubmit('reset-password', { password: payload.password, identifier, directReset: true });
     else if (isTokenReset) await onSubmit('reset-password', { ...payload, token: new URLSearchParams(window.location.search).get('reset') });
     else await onSubmit(isSignup ? 'signup' : 'login', payload);
   }
@@ -1507,14 +1539,16 @@ function AuthPanel({ mode, authError, authNotice, authLoading, role, onRoleChang
         </div>
       </div>
 
-      {isPasswordRecovery ? <>
-        {isDirectReset && <label>
-          Registered email or phone
+      {isDirectReset ? <>
+        <label>
+          New password
           <div className="input-with-icon">
-            <Mail size={18} />
-            <input name="identifier" type="text" autoComplete="username" placeholder="Registered email or phone" required />
+            <Lock size={18} />
+            <input name="password" type="password" autoComplete="new-password" minLength={6} placeholder="At least 6 characters" required />
           </div>
-        </label>}
+        </label>
+        <p className="demo-link">MVP notice: TurfCast is in its initial demo stage. Email verification is currently disabled, so you can reset your password directly. Use a demo password, not a personal password.</p>
+      </> : isTokenReset ? <>
         <label>
           New password
           <div className="input-with-icon">
@@ -1529,14 +1563,7 @@ function AuthPanel({ mode, authError, authNotice, authLoading, role, onRoleChang
             <input name="confirmPassword" type="password" autoComplete="new-password" minLength={6} placeholder="Re-enter your new password" required />
           </div>
         </label>
-        {isDirectReset && <p className="demo-link"><strong>MVP notice:</strong> Email verification is not enabled during this initial demo. You can reset your account password directly. Please use a demo password, not your personal password.</p>}
-      </> : isEmailResetRequest ? <label>
-        Registered email or phone
-        <div className="input-with-icon">
-          <Mail size={18} />
-          <input name="identifier" type="text" autoComplete="username" placeholder="Registered email or phone" required />
-        </div>
-      </label> : <>
+      </> : <>
       <label>Account type<div className="input-with-icon"><ShieldCheck size={18} /><select name="role" value={role} onChange={(event) => onRoleChange(event.target.value)}><option value="student">Student / Customer</option><option value="owner">Turf Admin / Owner</option></select></div></label>
       {isSignup ? (
         <>
@@ -1578,7 +1605,7 @@ function AuthPanel({ mode, authError, authNotice, authLoading, role, onRoleChang
           Email or Phone
           <div className="input-with-icon">
             <Mail size={18} />
-            <input name="identifier" type="text" placeholder="email or phone" />
+            <input name="identifier" type="text" placeholder="email or phone" value={identifier} onChange={(event) => onIdentifierChange(event.target.value)} />
           </div>
         </label>
       )}
@@ -1592,12 +1619,12 @@ function AuthPanel({ mode, authError, authNotice, authLoading, role, onRoleChang
         </div>
       </label>}
 
-      {(localError || authError) && <p className="form-error" role="alert">{localError || authError}</p>}
+      {authError && <p className="form-error" role="alert">{authError}</p>}
       {authNotice && !isDirectReset && <p className="demo-link" role="status">{authNotice}</p>}
 
       <button className="primary-button glow-button auth-submit" type="submit" disabled={authLoading}>
         {isSignup ? <UserPlus size={18} /> : <LogIn size={18} />}
-        <span>{authLoading ? 'Working' : isPasswordRecovery ? 'Update Password' : isEmailResetRequest ? 'Send Reset Link' : isSignup ? 'Create Account' : 'Login'}</span>
+        <span>{authLoading ? 'Working' : isRecoveryMode ? 'Update Password' : isSignup ? 'Create Account' : 'Login'}</span>
       </button>
 
       {isRecoveryMode ? <p className="auth-switch">
@@ -1608,7 +1635,7 @@ function AuthPanel({ mode, authError, authNotice, authLoading, role, onRoleChang
           {isSignup ? 'Login' : 'Sign up'}
         </button>
       </p>}
-      {mode === 'login' && <button className="text-button" type="button" onClick={() => onModeChange('forgot')}>Forgot Password?</button>}
+      {mode === 'login' && <button className="text-button" type="button" onClick={onForgotPassword}>Forgot Password?</button>}
     </form>
   );
 }
@@ -1647,6 +1674,7 @@ function OwnerExperience({
 }) {
   return (
     <div className="owner-console">
+      <div className="fixed-navigation-placeholder owner-navigation-placeholder" aria-hidden="true" />
       <nav className="owner-navigation" aria-label="Owner navigation">
         {ownerNavigation.map(({ id, label, icon: Icon }) => (
           <button
@@ -3333,9 +3361,89 @@ function SettingsModal({ settings, onClose, onSave }) {
 
 function ReceiptModal({ booking, confirmed = false, student = false, onClose }) {
   const dialogRef = useDialogAccessibility(onClose);
+  const [printError, setPrintError] = useState('');
 
   function printReceipt() {
-    window.print();
+    const ticket = {
+      id: booking.id,
+      date: formatDate(booking.date),
+      time: `${formatHour(booking.startHour)}–${formatHour(booking.endHour)}`,
+      section: booking.section,
+      sport: booking.sport,
+      status: booking.cancelledAt
+        ? 'Cancelled'
+        : String(booking.paymentStatus || '').toLowerCase() === 'paid'
+          ? 'Confirmed · Paid'
+          : 'Confirmed · Payment pending',
+      total: currency(booking.price),
+    };
+    const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    })[character]);
+    const printWindow = window.open('', '_blank', 'popup,width=760,height=640');
+    if (!printWindow) {
+      setPrintError('The ticket window was blocked. Allow pop-ups for TurfCast and try again.');
+      return;
+    }
+
+    setPrintError('');
+    printWindow.opener = null;
+    printWindow.onafterprint = () => printWindow.close();
+    try {
+      printWindow.document.open();
+      printWindow.document.write(`<!doctype html>
+        <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>TurfCast booking receipt · ${escapeHtml(ticket.id)}</title>
+            <style>
+              @page { size: auto; margin: 12mm; }
+              * { box-sizing: border-box; }
+              body { margin: 0; color: #1d241f; font: 14px/1.45 Arial, sans-serif; }
+              main { width: 100%; max-width: 680px; margin: 0 auto; }
+              .ticket { break-inside: avoid; border: 1px solid #d6dfd8; border-radius: 10px; padding: 24px; }
+              .brand { margin: 0; color: #18734b; font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+              h1 { margin: 8px 0 2px; font-size: 22px; }
+              .booking-id { margin: 0; color: #5d6a61; font-size: 12px; }
+              dl { display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; margin: 18px 0 0; border-top: 1px solid #d6dfd8; }
+              dl div { min-width: 0; padding: 10px 0; border-bottom: 1px solid #e5ebe6; }
+              dt { color: #627067; font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+              dd { margin: 3px 0 0; font-weight: 700; overflow-wrap: anywhere; }
+              .total { display: flex; justify-content: space-between; gap: 16px; margin-top: 16px; padding-top: 12px; border-top: 2px solid #18734b; font-size: 16px; font-weight: 800; }
+              @media screen { body { padding: 24px; background: #f3f6f4; } .ticket { background: #fff; box-shadow: 0 8px 28px #17251c1a; } }
+              @media print { body { padding: 0; } .ticket { padding: 18px; border-radius: 0; } }
+            </style>
+          </head>
+          <body>
+            <main>
+              <article class="ticket">
+                <p class="brand">TurfCast · College Sports Desk</p>
+                <h1>Booking receipt</h1>
+                <p class="booking-id">Booking ID · ${escapeHtml(ticket.id)}</p>
+                <dl>
+                  <div><dt>Date</dt><dd>${escapeHtml(ticket.date)}</dd></div>
+                  <div><dt>Time</dt><dd>${escapeHtml(ticket.time)}</dd></div>
+                  <div><dt>Section</dt><dd>${escapeHtml(ticket.section)}</dd></div>
+                  <div><dt>Sport</dt><dd>${escapeHtml(ticket.sport)}</dd></div>
+                  <div><dt>Status</dt><dd>${escapeHtml(ticket.status)}</dd></div>
+                </dl>
+                <div class="total"><span>Total</span><span>${escapeHtml(ticket.total)}</span></div>
+              </article>
+            </main>
+          </body>
+        </html>`);
+      printWindow.document.close();
+      printWindow.focus();
+      printWindow.setTimeout(() => printWindow.print(), 250);
+    } catch (error) {
+      printWindow.close();
+      setPrintError(error instanceof Error ? `The ticket could not be prepared for printing: ${error.message}` : 'The ticket could not be prepared for printing.');
+    }
   }
 
   const bookingStatus = booking.cancelledAt
@@ -3343,24 +3451,6 @@ function ReceiptModal({ booking, confirmed = false, student = false, onClose }) 
     : String(booking.paymentStatus || '').toLowerCase() === 'paid'
       ? 'Confirmed · Paid'
       : 'Confirmed · Payment pending';
-  const printableReceipt = (
-    <div id="receipt-print-root" aria-hidden="true">
-      <article className="receipt-print-ticket">
-        <p className="receipt-print-brand">TurfCast · College Sports Desk</p>
-        <h1>Booking receipt</h1>
-        <p className="receipt-print-id">Booking ID · {booking.id}</p>
-        <dl>
-          <div><dt>Date</dt><dd>{formatDate(booking.date)}</dd></div>
-          <div><dt>Time</dt><dd>{formatHour(booking.startHour)}–{formatHour(booking.endHour)}</dd></div>
-          <div><dt>Section</dt><dd>{booking.section}</dd></div>
-          <div><dt>Sport</dt><dd>{booking.sport}</dd></div>
-          <div><dt>Status</dt><dd>{bookingStatus}</dd></div>
-        </dl>
-        <div className="receipt-print-total"><span>Total</span><strong>{currency(booking.price)}</strong></div>
-      </article>
-    </div>
-  );
-
   return (
     <>
       <div className="modal-backdrop">
@@ -3404,9 +3494,9 @@ function ReceiptModal({ booking, confirmed = false, student = false, onClose }) 
               <span>Print</span>
             </button>
           </div>
+          {printError && <p className="form-error" role="alert">{printError}</p>}
         </section>
       </div>
-      {createPortal(printableReceipt, document.body)}
     </>
   );
 }
