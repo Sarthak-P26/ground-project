@@ -11,14 +11,14 @@ A full web app for booking a college turf split into four playable sections. It 
 - Owner dashboard for all bookings, payment collection, revenue, occupancy, settings, and demand analytics
 - File-backed user accounts with hashed passwords
 - Password recovery emails with one-time links that expire after 15 minutes
-- Local MVP direct password reset is disabled by default and never available in production
+- Local MVP direct password reset is available in development only; production requires a verified reset link
 - Three-hour slots at Rs. 600 by default
 - Configurable price, duration, open hours, close hours, sports, and section names
 - Shared Node API with file-backed storage in `data/store.json`
 - Authenticated workspaces refresh shared bookings and turf settings every 15 seconds and when the browser regains focus
 - Duplicate-slot protection so two players cannot book the same section and time
 - Server-side validation for phone numbers, booking window, maintenance dates, sections, sports, and valid time slots
-- Owner-only controls for exports, all-booking cancellation, payment updates, and turf settings
+- Owner-only controls for all-booking cancellation, payment updates, and turf settings
 - Students can view and cancel only their own future bookings
 - Fairness limit for active bookings per phone number
 - Maintenance-date blocking
@@ -27,7 +27,6 @@ A full web app for booking a college turf split into four playable sections. It 
 - Searchable booking records
 - Sport filter for booking records
 - Booking cancellation
-- CSV export
 - Responsive premium UI with animated turf overview
 
 ## Run
@@ -133,9 +132,3 @@ inclusive. New bookings keep the price that was active when they were created. T
 Pricing page can set a manual or promotional price for an upcoming date, section, and
 time slot; the upcoming list excludes expired times and resetting a slot restores the
 default price. Only authenticated owners can manage prices.
-
-The owner sales CSV is an aggregate daily report, not a personal booking export. Its
-columns are Date, Total Bookings, Confirmed Bookings, Cancelled/Refunded Bookings,
-Confirmed Players, Booking Value (INR), Collected Revenue (INR), and Pending Amount
-(INR), followed by a TOTAL row. Cancelled and refunded bookings are excluded from
-confirmed value, revenue, pending amount, and player totals.

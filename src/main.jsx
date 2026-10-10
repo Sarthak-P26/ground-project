@@ -10,7 +10,6 @@ import {
   CloudSun,
   Clock,
   CreditCard,
-  Download,
   Dumbbell,
   Eye,
   Filter,
@@ -41,7 +40,6 @@ import {
 import { Bar, BarChart as RechartsBarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import turfImage from './assets/four-section-turf.png';
 import { isValidMaintenanceDate, maintenanceDatesFromPeriods, maintenancePeriodsFromDates } from './maintenancePeriods.js';
-import { buildSalesReportCsv } from './salesReport.js';
 import './styles.css';
 
 const STORAGE_KEYS = {
@@ -942,17 +940,6 @@ function App() {
     document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
-  function exportBookings() {
-    const csv = buildSalesReportCsv(bookings);
-    const blob = new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `turf-sales-report-${toDateInput(new Date())}.csv`;
-    link.click();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
-
   if (!currentUser) {
     if (sessionLoading) {
       return <main className="app-shell" role="status">Checking your session…</main>;
@@ -1009,9 +996,6 @@ function App() {
             <UserRound size={18} />
             <span>{currentUser.name}</span>
           </div>
-          {isOwner && <button className="ghost-button" type="button" onClick={exportBookings} title="Export bookings">
-            <Download size={18} /><span>Export</span>
-          </button>}
           {!isOwner && <button className="ghost-button" type="button" onClick={() => setShowProfile(true)}><UserRound size={18} /><span>Profile</span></button>}
           <span className={`sync-pill ${syncStatus.toLowerCase()}`}>{syncStatus}</span>
           <button className="icon-button" type="button" onClick={logout} title="Log out">
@@ -1444,7 +1428,7 @@ function AuthExperience({ authMode, authError, authNotice, authLoading, settings
       <section className="auth-product-band">
         <ProductPillar icon={<CalendarDays size={20} />} title="Book faster" text="Students see available sections instantly and reserve without confusion." />
         <ProductPillar icon={<ShieldCheck size={20} />} title="Keep it fair" text="Limits, maintenance dates, and admin controls protect equal access." />
-        <ProductPillar icon={<ClipboardCheck size={20} />} title="Run records cleanly" text="Receipts, exports, payments, and cancellations stay organized." />
+        <ProductPillar icon={<ClipboardCheck size={20} />} title="Run records cleanly" text="Receipts, payments, and cancellations stay organized." />
       </section>
     </main>
   );
